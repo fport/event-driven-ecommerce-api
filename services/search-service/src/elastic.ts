@@ -1,41 +1,52 @@
 import { Client } from "@elastic/elasticsearch";
+import { HttpConnection } from "@elastic/transport";
 import type { Order } from "@ecommerce/shared";
 
 const INDEX = "orders";
 
 const client = new Client({
   node: process.env.ELASTICSEARCH_URL || "http://localhost:9200",
+  Connection: HttpConnection,
 });
 
-export async function ensureIndex(): Promise<void> {
-  const exists = await client.indices.exists({ index: INDEX });
-  if (!exists) {
-    await client.indices.create({
-      index: INDEX,
-      body: {
-        mappings: {
-          properties: {
-            id: { type: "keyword" },
-            customerName: { type: "text" },
-            customerEmail: { type: "keyword" },
-            items: {
-              type: "nested",
+export async function ensureIndex(retries = 10, delay = 3000): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const exists = await client.indices.exists({ index: INDEX });
+      if (!exists) {
+        await client.indices.create({
+          index: INDEX,
+          body: {
+            mappings: {
               properties: {
-                productId: { type: "keyword" },
-                name: { type: "text" },
-                quantity: { type: "integer" },
-                price: { type: "float" },
+                id: { type: "keyword" },
+                customerName: { type: "text" },
+                customerEmail: { type: "keyword" },
+                items: {
+                  type: "nested",
+                  properties: {
+                    productId: { type: "keyword" },
+                    name: { type: "text" },
+                    quantity: { type: "integer" },
+                    price: { type: "float" },
+                  },
+                },
+                totalAmount: { type: "float" },
+                status: { type: "keyword" },
+                createdAt: { type: "date" },
+                updatedAt: { type: "date" },
               },
             },
-            totalAmount: { type: "float" },
-            status: { type: "keyword" },
-            createdAt: { type: "date" },
-            updatedAt: { type: "date" },
           },
-        },
-      },
-    });
-    console.log(`ElasticSearch index "${INDEX}" created`);
+        });
+        console.log(`ElasticSearch index "${INDEX}" created`);
+      }
+      return;
+    } catch (err) {
+      console.log(`ES connection attempt ${attempt}/${retries} failed, retrying in ${delay / 1000}s...`);
+      if (attempt === retries) throw err;
+      await new Promise((r) => setTimeout(r, delay));
+    }
   }
 }
 

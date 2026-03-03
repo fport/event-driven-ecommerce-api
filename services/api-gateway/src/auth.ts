@@ -1,10 +1,10 @@
 import { betterAuth } from "better-auth";
+import { Pool } from "pg";
 
 export const auth = betterAuth({
-  database: {
-    type: "sqlite",
-    url: process.env.AUTH_DB_URL || "./auth.db",
-  },
+  database: new Pool({
+    connectionString: process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/orders",
+  }),
   secret: process.env.AUTH_SECRET || "dev-secret-change-in-production",
   baseURL: process.env.BASE_URL || "http://localhost:3000",
   trustedOrigins: [process.env.BASE_URL || "http://localhost:3000"],

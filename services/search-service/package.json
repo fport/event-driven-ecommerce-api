@@ -8,6 +8,7 @@
   "dependencies": {
     "@ecommerce/shared": "workspace:*",
     "@elastic/elasticsearch": "^8.17.0",
+    "@elastic/transport": "^8.10.0",
     "amqplib": "^0.10.9",
     "hono": "^4.7.0"
   },

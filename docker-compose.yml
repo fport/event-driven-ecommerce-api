@@ -21,11 +21,18 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/orders
     depends_on:
-      - order-service
-      - notification-service
-      - inventory-service
-      - search-service
+      postgres:
+        condition: service_healthy
+      order-service:
+        condition: service_started
+      notification-service:
+        condition: service_started
+      inventory-service:
+        condition: service_started
+      search-service:
+        condition: service_started
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/health').then(r => r.ok ? process.exit(0) : process.exit(1))"]
       interval: 10s

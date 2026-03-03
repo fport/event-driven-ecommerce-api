@@ -9,6 +9,7 @@
   "dependencies": {
     "@ecommerce/shared": "workspace:*",
     "better-auth": "^1.2.0",
+    "pg": "^8.13.0",
     "hono": "^4.7.0",
     "ioredis": "^5.10.0"
   },

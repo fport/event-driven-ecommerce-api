@@ -1,0 +1,132 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Event-Driven E-Commerce",
+  "logo": {
+    "dark": "/logo/dark.svg",
+    "light": "/logo/light.svg"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#6366F1",
+    "light": "#818CF8",
+    "dark": "#4F46E5",
+    "anchors": {
+      "from": "#6366F1",
+      "to": "#8B5CF6"
+    }
+  },
+  "topbarLinks": [
+    {
+      "name": "GitHub",
+      "url": "https://github.com"
+    }
+  ],
+  "tabs": [
+    {
+      "name": "Dokumantasyon",
+      "url": "giris"
+    },
+    {
+      "name": "Altyapi",
+      "url": "altyapi"
+    },
+    {
+      "name": "API Referansi",
+      "url": "api-referansi"
+    },
+    {
+      "name": "Gelistirme",
+      "url": "gelistirme"
+    }
+  ],
+  "navigation": [
+    {
+      "group": "Giris",
+      "pages": [
+        "giris/genel-bakis",
+        "giris/hizli-baslangic",
+        "giris/teknoloji-yigini"
+      ]
+    },
+    {
+      "group": "Mimari",
+      "pages": [
+        "mimari/event-driven-mimari",
+        "mimari/mikroservis-tasarimi",
+        "mimari/ddd-kavramlari",
+        "mimari/sistem-diyagrami",
+        "mimari/veri-akisi"
+      ]
+    },
+    {
+      "group": "Servisler",
+      "pages": [
+        "servisler/genel-bakis",
+        "servisler/api-gateway",
+        "servisler/order-service",
+        "servisler/notification-service",
+        "servisler/inventory-service",
+        "servisler/search-service",
+        "servisler/shared-package"
+      ]
+    },
+    {
+      "group": "Tasarim Kaliplari",
+      "pages": [
+        "patterns/saga-pattern",
+        "patterns/circuit-breaker",
+        "patterns/dead-letter-queue",
+        "patterns/caching-stratejisi",
+        "patterns/rate-limiting",
+        "patterns/read-write-splitting"
+      ]
+    },
+    {
+      "group": "Konteyner & Orkestrasyon",
+      "pages": [
+        "altyapi/docker-compose",
+        "altyapi/kubernetes",
+        "altyapi/terraform"
+      ]
+    },
+    {
+      "group": "Izleme & CI/CD",
+      "pages": [
+        "altyapi/izleme-monitoring",
+        "altyapi/ci-cd"
+      ]
+    },
+    {
+      "group": "API Referansi",
+      "pages": [
+        "api-referansi/genel-bakis",
+        "api-referansi/kimlik-dogrulama",
+        "api-referansi/siparisler",
+        "api-referansi/urunler",
+        "api-referansi/bildirimler",
+        "api-referansi/arama"
+      ]
+    },
+    {
+      "group": "Gelistirici Kilavuzu",
+      "pages": [
+        "gelistirme/yerel-kurulum",
+        "gelistirme/ortam-degiskenleri",
+        "gelistirme/veritabani-migration",
+        "gelistirme/test-stratejisi",
+        "gelistirme/proje-yapisi"
+      ]
+    },
+    {
+      "group": "Deployment",
+      "pages": [
+        "deployment/docker-uretim",
+        "deployment/kubernetes-deployment",
+        "deployment/ci-cd-pipeline"
+      ]
+    }
+  ],
+  "footerSocials": {
+    "github": "https://github.com"
+  }
+}
