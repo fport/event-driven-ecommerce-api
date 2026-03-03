@@ -1,0 +1,322 @@
+---
+title: "Docker ile Uretim Dagitimi"
+description: "Docker Compose ile production ortaminda servislerin yapilandirilmasi, multi-stage build ve olcekleme"
+---
+
+# Docker ile Uretim Dagitimi
+
+Bu rehber, event-driven e-ticaret projesinin Docker Compose kullanilarak uretim ortaminda nasil yapilandirilacagini ve calistirilacagini aciklar.
+
+## Mimari Genel Bakis
+
+```mermaid
+flowchart TB
+    subgraph "Docker Compose Ortami"
+        subgraph "Uygulama Servisleri"
+            GW[API Gateway\n:3000]
+            OS[Order Service\n:3001]
+            NS[Notification Service\n:3002]
+            IS[Inventory Service\n:3003]
+            SS[Search Service\n:3004]
+        end
+        subgraph "Veri Katmani"
+            PG[(PostgreSQL Primary\n:5432)]
+            PGR[(PostgreSQL Replica\n:5433)]
+            Redis[(Redis\n:6379)]
+            Mongo[(MongoDB\n:27017)]
+            ES[(Elasticsearch\n:9200)]
+            RMQ[RabbitMQ\n:5672]
+        end
+        subgraph "Izleme"
+            Prom[Prometheus\n:9090]
+            Graf[Grafana\n:3100]
+            APM[APM Server\n:8200]
+            Kib[Kibana\n:5601]
+        end
+    end
+    GW --> OS & NS & IS & SS
+    OS --> PG & PGR & Redis & RMQ
+    NS --> RMQ & Mongo
+    IS --> RMQ & Redis
+    SS --> RMQ & ES
+    Prom --> GW & OS & NS & IS & SS
+    APM --> ES
+    Kib --> ES
+    Graf --> Prom
+```
+
+## Multi-Stage Dockerfile
+
+Her servis, multi-stage build (cok asamali yapi) kullanan bir Dockerfile ile paketlenir. Bu yontem nihai imaj boyutunu minimize eder.
+
+```dockerfile services/order-service/Dockerfile
+# Temel imaj
+FROM oven/bun:1 AS base
+WORKDIR /app
+
+# Bagimliliklari yukle
+FROM base AS deps
+COPY package.json bun.lock* ./
+COPY packages/shared/package.json ./packages/shared/
+COPY services/order-service/package.json ./services/order-service/
+RUN bun install --frozen-lockfile 2>/dev/null || bun install
+
+# Calisma asamasi
+FROM base AS runner
+COPY --from=deps /app/node_modules ./node_modules
+COPY packages/shared ./packages/shared
+COPY services/order-service ./services/order-service
+
+WORKDIR /app/services/order-service
+ENV NODE_ENV=production
+EXPOSE 3001
+
+CMD ["bun", "run", "src/index.ts"]
+```
+
+### Build Asamalari Aciklamasi
+
+| Asama | Amac |
+|-------|------|
+| `base` | Bun runtime iceren temel imaj |
+| `deps` | Yalnizca `package.json` dosyalari kopyalanir ve bagimliliklar yuklenir. Bu katman cache'lenir (onbelleklenir) |
+| `runner` | Kaynak kod kopyalanir ve uygulama baslatilir |
+
+<Tip>
+  Bagimlilik yukleme asamasi (`deps`) ayri bir katmanda tutularak, yalnizca `package.json` degistiginde bu adim yeniden calistirilir. Kaynak kod degisikliklerinde bu katman cache'den (onbellekten) gelir, bu da build surelerini onemli olcude kisaltir.
+</Tip>
+
+## Uretim Docker Compose Yapilandirmasi
+
+### Tum Servisleri Baslatma
+
+```bash
+# Tum servisleri build edip baslat
+docker compose up -d --build
+
+# Durumu kontrol et
+docker compose ps
+
+# Loglari izle
+docker compose logs -f --tail=50
+```
+
+### Servis Yapilandirmasi
+
+Her servis icin Docker Compose'da asagidaki yapilandirmalar tanimlanmistir:
+
+<Tabs>
+  <Tab title="Health Checks">
+    Tum uygulama servisleri health check (saglik kontrolu) ile yapilandirilmistir:
+
+    ```yaml
+    healthcheck:
+      test: ["CMD", "bun", "-e",
+        "fetch('http://localhost:3001/health').then(r => r.ok ? process.exit(0) : process.exit(1))"]
+      interval: 10s      # Kontrol araligi
+      timeout: 5s         # Zaman asimi
+      retries: 3          # Yeniden deneme sayisi
+      start_period: 10s   # Ilk kontrol oncesi bekleme
+    ```
+
+    Altyapi servisleri de kendi saglik kontrollerine sahiptir:
+
+    | Servis | Kontrol Yontemi |
+    |--------|----------------|
+    | PostgreSQL | `pg_isready -U postgres` |
+    | Redis | `redis-cli ping` |
+    | MongoDB | `mongosh --eval "db.adminCommand('ping')"` |
+    | RabbitMQ | `rabbitmq-diagnostics -q ping` |
+    | Elasticsearch | `curl -f http://localhost:9200/_cluster/health` |
+  </Tab>
+
+  <Tab title="Bagimlilk Sirasi">
+    Servisler `depends_on` ile dogru sirada baslatilir:
+
+    ```yaml
+    order-service:
+      depends_on:
+        postgres:
+          condition: service_healthy
+        postgres-replica:
+          condition: service_healthy
+        redis:
+          condition: service_healthy
+        rabbitmq:
+          condition: service_healthy
+    ```
+
+    Baslatma sirasi:
+    1. Veritabanlari (PostgreSQL, Redis, MongoDB, Elasticsearch)
+    2. Mesaj kuyrugu (RabbitMQ)
+    3. Uygulama servisleri (Order, Notification, Inventory, Search)
+    4. API Gateway (tum servisler hazir olduktan sonra)
+    5. Izleme araclari (Prometheus, Grafana, APM, Kibana)
+  </Tab>
+
+  <Tab title="Yeniden Baslatma Politikasi">
+    Tum uygulama servisleri `unless-stopped` politikasi ile yapilandirilmistir:
+
+    ```yaml
+    restart: unless-stopped
+    ```
+
+    Bu politika ile:
+    - Servis coktugunde otomatik olarak yeniden baslatilir
+    - Docker daemon yeniden basladiginda servis otomatik baslar
+    - Yalnizca `docker compose stop` ile durdurulan servisler yeniden baslatilmaz
+  </Tab>
+</Tabs>
+
+## Volume Yonetimi
+
+Kalici veriler Docker volume'lari (hacim) ile yonetilir:
+
+```yaml
+volumes:
+  postgres_data:         # PostgreSQL primary verileri
+  postgres_replica_data: # PostgreSQL replica verileri
+  redis_data:            # Redis kalici verileri
+  mongo_data:            # MongoDB belge verileri
+  rabbitmq_data:         # RabbitMQ kuyruk ve yapilandirma verileri
+  es_data:               # Elasticsearch indeks verileri
+  prometheus_data:       # Prometheus metrik verileri
+  grafana_data:          # Grafana pano ve yapilandirma verileri
+```
+
+### Volume Islemleri
+
+<CodeGroup>
+```bash Volume'lari Listele
+docker volume ls | grep event-driven
+```
+
+```bash Belirli Volume Boyutu
+docker system df -v | grep event-driven
+```
+
+```bash Tum Volume'lari Sil (Dikkat!)
+docker compose down -v
+```
+</CodeGroup>
+
+<Warning>
+  `docker compose down -v` komutu tum kalici verileri siler. Uretim ortaminda bu komutu calistirmadan once yedek (backup) almayi unutmayin.
+</Warning>
+
+## Uretim Ortam Degiskenleri
+
+Uretim ortaminda ortam degiskenlerini `.env` dosyasi veya Docker secrets ile yonetmelisiniz:
+
+```bash .env.production
+# Veritabani
+DATABASE_URL=postgres://produser:GUCLU_SIFRE@postgres:5432/orders
+DATABASE_REPLICA_URL=postgres://produser:GUCLU_SIFRE@postgres-replica:5432/orders
+
+# Guvenlik
+AUTH_SECRET=uretim-icin-rastgele-uzun-ve-guclu-bir-anahtar
+NODE_ENV=production
+
+# OAuth
+GITHUB_CLIENT_ID=uretim_github_client_id
+GITHUB_CLIENT_SECRET=uretim_github_client_secret
+GOOGLE_CLIENT_ID=uretim_google_client_id
+GOOGLE_CLIENT_SECRET=uretim_google_client_secret
+```
+
+Kullanim:
+
+```bash
+docker compose --env-file .env.production up -d
+```
+
+## Servis Olcekleme
+
+Docker Compose ile yatay olcekleme (horizontal scaling) yapabilirsiniz:
+
+```bash
+# Order service'i 3 instance'a olcekle
+docker compose up -d --scale order-service=3
+
+# Birden fazla servisi ayni anda olcekle
+docker compose up -d --scale order-service=3 --scale inventory-service=2
+```
+
+<Note>
+  Servis olceleme yaparken port cakismasi yasanmamasi icin, olceklenen servislerin host port eslesmelerini kaldirmaniz veya API Gateway uzerinden yuk dengeleme (load balancing) yapilandirmaniz gerekebilir.
+</Note>
+
+## Imaj Yonetimi
+
+### Imajlari Build Etme
+
+```bash
+# Tum imajlari build et
+docker compose build
+
+# Belirli bir servisi build et
+docker compose build order-service
+
+# Cache kullanmadan build et
+docker compose build --no-cache order-service
+```
+
+### Imajlari Registry'ye Gonderme
+
+```bash
+# Etiketle
+docker tag event-driven-project-order-service:latest \
+  ghcr.io/<kullanici>/event-driven-project/order-service:v1.0.0
+
+# Push et
+docker push ghcr.io/<kullanici>/event-driven-project/order-service:v1.0.0
+```
+
+## Izleme ve Log Yonetimi
+
+### Servis Loglarini Izleme
+
+```bash
+# Tum servislerin loglarini izle
+docker compose logs -f
+
+# Belirli bir servisin loglari
+docker compose logs -f order-service --tail=100
+
+# Son 1 saatin loglari (timestamp ile)
+docker compose logs --since 1h -t order-service
+```
+
+### Izleme Arayuzleri
+
+| Arayuz | URL | Kullanici / Sifre |
+|--------|-----|-------------------|
+| Grafana | `http://localhost:3100` | `admin` / `admin` |
+| Prometheus | `http://localhost:9090` | - |
+| Kibana | `http://localhost:5601` | - |
+| RabbitMQ Management | `http://localhost:15672` | `guest` / `guest` |
+
+## Uretim Kontrol Listesi
+
+Uretim ortamina almadan once asagidaki kontrolleri yapin:
+
+<Steps>
+  <Step title="Ortam Degiskenleri">
+    Tum varsayilan sifrelerin degistirildigini dogrulayin (`AUTH_SECRET`, veritabani sifreleri, RabbitMQ kullanici bilgileri).
+  </Step>
+  <Step title="Health Check Dogrulamasi">
+    Tum servislerin saglik kontrollerini gectiginden emin olun: `docker compose ps`
+  </Step>
+  <Step title="Volume Yedekleme">
+    Kalici volume'lar icin yedekleme stratejisi olusturdugumuzdan emin olun.
+  </Step>
+  <Step title="Log Toplama">
+    Merkezi log toplama sisteminin yapilandirildigini dogrulayin (Kibana + Elasticsearch).
+  </Step>
+  <Step title="Izleme Panolari">
+    Grafana panolarinin dogru calittigini ve alarm kurallarinin tanimlandigini kontrol edin.
+  </Step>
+  <Step title="Kaynak Limitleri">
+    Container kaynak limitlerinin (CPU, bellek) uygun sekilde ayarlandigini dogrulayin.
+  </Step>
+</Steps>

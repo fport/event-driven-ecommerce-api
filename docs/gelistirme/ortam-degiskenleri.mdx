@@ -1,0 +1,166 @@
+---
+title: "Ortam Degiskenleri"
+description: "Tum servislerde kullanilan environment variable'larin (ortam degiskenleri) kapsamli referansi"
+---
+
+# Ortam Degiskenleri
+
+Her mikro servis kendine ozgu ortam degiskenlerine ihtiyac duyar. Bu sayfa tum servislerdeki degiskenleri, varsayilan degerlerini ve zorunluluk durumlarini listelemektedir.
+
+<Warning>
+  Production (uretim) ortaminda `AUTH_SECRET`, veritabani sifreleri ve OAuth client secret degerleri **mutlaka** degistirilmelidir. Varsayilan degerleri uretim ortaminda kullanmak ciddi guvenlik aciklarina yol acar.
+</Warning>
+
+## Ortak Degiskenler
+
+Asagidaki degiskenler tum servislerde ortaktir:
+
+| Degisken | Zorunlu | Varsayilan | Aciklama |
+|----------|---------|------------|----------|
+| `PORT` | Evet | Servise gore degisir | Servisin dinledigi port numarasi |
+| `NODE_ENV` | Hayir | `development` | Calisma ortami (`development`, `production`) |
+| `APM_SERVER_URL` | Hayir | `http://apm-server:8200` | Elastic APM (Application Performance Monitoring) sunucu adresi |
+| `APM_SERVICE_NAME` | Hayir | - | APM'de gosterilecek servis adi |
+
+## Servise Ozel Degiskenler
+
+<Tabs>
+  <Tab title="API Gateway">
+    **Port:** `3000`
+
+    | Degisken | Zorunlu | Varsayilan | Aciklama |
+    |----------|---------|------------|----------|
+    | `PORT` | Evet | `3000` | Servis portu |
+    | `ORDER_SERVICE_URL` | Evet | `http://order-service:3001` | Siparis servisinin adresi |
+    | `NOTIFICATION_SERVICE_URL` | Evet | `http://notification-service:3002` | Bildirim servisinin adresi |
+    | `INVENTORY_SERVICE_URL` | Evet | `http://inventory-service:3003` | Envanter servisinin adresi |
+    | `SEARCH_SERVICE_URL` | Evet | `http://search-service:3004` | Arama servisinin adresi |
+    | `AUTH_SECRET` | Evet | `super-secret-key-change-in-production` | Better Auth oturum sifresi |
+    | `BASE_URL` | Evet | `http://localhost:3000` | Uygulamanin temel URL'i |
+    | `GITHUB_CLIENT_ID` | Hayir | - | GitHub OAuth uygulama kimlik numarasi |
+    | `GITHUB_CLIENT_SECRET` | Hayir | - | GitHub OAuth uygulama gizli anahtari |
+    | `GOOGLE_CLIENT_ID` | Hayir | - | Google OAuth uygulama kimlik numarasi |
+    | `GOOGLE_CLIENT_SECRET` | Hayir | - | Google OAuth uygulama gizli anahtari |
+    | `REDIS_URL` | Evet | `redis://localhost:6379` | Redis baglanti URL'i (rate limiting icin) |
+    | `DATABASE_URL` | Evet | `postgres://postgres:postgres@localhost:5432/orders` | PostgreSQL baglanti URL'i (auth icin) |
+
+    <Note>
+      GitHub ve Google OAuth degiskenleri opsiyoneldir. Tanimlanmazlarsa yalnizca e-posta/sifre ile kimlik dogrulama aktif olur.
+    </Note>
+  </Tab>
+
+  <Tab title="Order Service">
+    **Port:** `3001`
+
+    | Degisken | Zorunlu | Varsayilan | Aciklama |
+    |----------|---------|------------|----------|
+    | `PORT` | Evet | `3001` | Servis portu |
+    | `DATABASE_URL` | Evet | `postgres://postgres:postgres@localhost:5432/orders` | PostgreSQL primary (ana sunucu) baglanti URL'i |
+    | `DATABASE_REPLICA_URL` | Hayir | - | PostgreSQL replica (kopya sunucu) baglanti URL'i. Tanimlanirsa okuma islemleri buraya yonlendirilir |
+    | `REDIS_URL` | Evet | `redis://localhost:6379` | Redis baglanti URL'i (cache / onbellek icin) |
+    | `RABBITMQ_URL` | Evet | `amqp://guest:guest@localhost:5672` | RabbitMQ baglanti URL'i (event yayinlama icin) |
+
+    <Tip>
+      `DATABASE_REPLICA_URL` tanimlandiginda read/write splitting (okuma/yazma ayristirmasi) otomatik olarak aktif olur. Yazma islemleri primary'e, okuma islemleri replica'ya yonlendirilir.
+    </Tip>
+  </Tab>
+
+  <Tab title="Notification Service">
+    **Port:** `3002`
+
+    | Degisken | Zorunlu | Varsayilan | Aciklama |
+    |----------|---------|------------|----------|
+    | `PORT` | Evet | `3002` | Servis portu |
+    | `RABBITMQ_URL` | Evet | `amqp://guest:guest@localhost:5672` | RabbitMQ baglanti URL'i (event dinleme icin) |
+    | `MONGODB_URL` | Evet | `mongodb://localhost:27017/notifications` | MongoDB baglanti URL'i (bildirim kayitlari icin) |
+  </Tab>
+
+  <Tab title="Inventory Service">
+    **Port:** `3003`
+
+    | Degisken | Zorunlu | Varsayilan | Aciklama |
+    |----------|---------|------------|----------|
+    | `PORT` | Evet | `3003` | Servis portu |
+    | `RABBITMQ_URL` | Evet | `amqp://guest:guest@localhost:5672` | RabbitMQ baglanti URL'i (event dinleme icin) |
+    | `REDIS_URL` | Evet | `redis://localhost:6379` | Redis baglanti URL'i (stok verisi icin) |
+  </Tab>
+
+  <Tab title="Search Service">
+    **Port:** `3004`
+
+    | Degisken | Zorunlu | Varsayilan | Aciklama |
+    |----------|---------|------------|----------|
+    | `PORT` | Evet | `3004` | Servis portu |
+    | `RABBITMQ_URL` | Evet | `amqp://guest:guest@localhost:5672` | RabbitMQ baglanti URL'i (event dinleme icin) |
+    | `ELASTICSEARCH_URL` | Evet | `http://localhost:9200` | Elasticsearch baglanti URL'i |
+  </Tab>
+</Tabs>
+
+## Ornek `.env` Dosyasi
+
+Yerel gelistirme ortami icin kullanabileceginiz ornek `.env` dosyasi:
+
+```bash .env
+# Genel
+NODE_ENV=development
+
+# PostgreSQL
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/orders
+DATABASE_REPLICA_URL=postgres://postgres:postgres@localhost:5433/orders
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# RabbitMQ
+RABBITMQ_URL=amqp://guest:guest@localhost:5672
+
+# MongoDB
+MONGODB_URL=mongodb://localhost:27017/notifications
+
+# Elasticsearch
+ELASTICSEARCH_URL=http://localhost:9200
+
+# APM
+APM_SERVER_URL=http://localhost:8200
+
+# Auth
+AUTH_SECRET=super-secret-key-change-in-production
+BASE_URL=http://localhost:3000
+
+# OAuth (opsiyonel)
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+```
+
+## Docker Compose Ortaminda Degiskenler
+
+Docker Compose kullaniminda servisler birbirine container adi uzerinden erisir. Bu nedenle `localhost` yerine servis adlari kullanilir:
+
+```yaml
+# docker-compose.yml icinden ornek
+environment:
+  - DATABASE_URL=postgres://postgres:postgres@postgres:5432/orders
+  - REDIS_URL=redis://redis:6379
+  - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+  - MONGODB_URL=mongodb://mongo:27017/notifications
+  - ELASTICSEARCH_URL=http://elasticsearch:9200
+```
+
+<Warning>
+  Yerel gelistirme ile Docker Compose ortaminda host isimleri farklidir. Yerel gelistirmede `localhost`, Docker Compose'da ise container servis adlari (ornegin `postgres`, `redis`, `rabbitmq`) kullanilir.
+</Warning>
+
+## Uretim Ortami Icin Kontrol Listesi
+
+Uretim ortamina gecmeden once asagidaki degiskenlerin guncellenmesi **zorunludur**:
+
+| Degisken | Neden |
+|----------|-------|
+| `AUTH_SECRET` | Varsayilan deger (`super-secret-key-change-in-production`) guvensizdir |
+| `POSTGRES_PASSWORD` | Varsayilan `postgres` sifresi kabul edilemez |
+| `RABBITMQ_DEFAULT_USER/PASS` | Varsayilan `guest/guest` yalnizca gelistirme icindir |
+| `GF_SECURITY_ADMIN_PASSWORD` | Grafana varsayilan `admin` sifresi degistirilmelidir |
+| `GITHUB_CLIENT_SECRET` | Production OAuth uygulamasinin gercek secret'i kullanilmalidir |
+| `GOOGLE_CLIENT_SECRET` | Production OAuth uygulamasinin gercek secret'i kullanilmalidir |

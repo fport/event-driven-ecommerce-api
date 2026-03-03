@@ -1,0 +1,438 @@
+---
+title: "Order Service"
+description: "Siparis yonetimi servisi. CRUD islemleri, saga tabanli checkout, write-through cache, read/write split ve event publishing ozellikleri."
+---
+
+# Order Service
+
+Order Service, e-ticaret platformunun temel servisidir. Siparis olusturma, guncelleme, listeleme ve saga tabanli checkout islemlerini yurutur.
+
+**Port:** 3001
+**Veritabani:** PostgreSQL (primary + replica) + Redis (cache)
+**Framework:** Hono.dev
+**ORM:** Drizzle ORM
+
+## Veritabani Semasi
+
+Siparis verileri Drizzle ORM ile PostgreSQL'de saklanir:
+
+```typescript
+// services/order-service/src/db/schema.ts
+import { pgTable, uuid, varchar, numeric, jsonb, timestamp } from "drizzle-orm/pg-core";
+
+export const orders = pgTable("orders", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  customerName: varchar("customer_name", { length: 255 }).notNull(),
+  customerEmail: varchar("customer_email", { length: 255 }).notNull(),
+  items: jsonb("items").notNull().$type<
+    { productId: string; name: string; quantity: number; price: number }[]
+  >(),
+  totalAmount: numeric("total_amount", { precision: 12, scale: 2 }).notNull(),
+  status: varchar("status", { length: 50 }).notNull().default("pending"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+```
+
+### Siparis Durumlari
+
+| Durum        | Aciklama                                 |
+|--------------|------------------------------------------|
+| `pending`    | Siparis olusturuldu, islem bekleniyor    |
+| `confirmed`  | Saga basarili, odeme onaylandi           |
+| `processing` | Siparis isleniyor                        |
+| `shipped`    | Kargo verildi                            |
+| `delivered`  | Teslim edildi                            |
+| `cancelled`  | Iptal edildi                             |
+
+## Read/Write Split (Okuma/Yazma Ayirimi)
+
+Veritabani islemleri, primary ve replica sunucular arasinda ayrilmistir:
+
+```typescript
+// services/order-service/src/db/index.ts
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+
+const primaryUrl = process.env.DATABASE_URL
+  || "postgres://postgres:postgres@localhost:5432/orders";
+const replicaUrl = process.env.DATABASE_REPLICA_URL || primaryUrl;
+
+const primaryClient = postgres(primaryUrl);
+const replicaClient = postgres(replicaUrl, { readonly: true });
+
+/** Yazma islemleri (INSERT, UPDATE, DELETE) */
+export const db = drizzle(primaryClient, { schema });
+
+/** Okuma islemleri (SELECT) - replica'ya yonlendirilir */
+export const readDb = drizzle(replicaClient, { schema });
+```
+
+```mermaid
+graph LR
+    OS[Order Service]
+    OS -->|INSERT / UPDATE / DELETE| PG_P[(PostgreSQL Primary)]
+    OS -->|SELECT| PG_R[(PostgreSQL Replica)]
+    PG_P -->|Streaming Replication| PG_R
+```
+
+<Note>
+  `DATABASE_REPLICA_URL` tanimlanmamissa, hem okuma hem yazma islemleri primary veritabanina yonlendirilir.
+</Note>
+
+## API Endpoint'leri
+
+### Tum Siparisleri Listeleme
+
+<CodeGroup>
+```bash Istek
+curl http://localhost:3001/orders
+```
+
+```json Yanit
+{
+  "success": true,
+  "data": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "customerName": "Ahmet Yilmaz",
+      "customerEmail": "ahmet@example.com",
+      "items": [
+        { "productId": "p1", "name": "Laptop", "quantity": 1, "price": 15000 }
+      ],
+      "totalAmount": 15000,
+      "status": "pending",
+      "createdAt": "2026-03-03T10:00:00.000Z",
+      "updatedAt": "2026-03-03T10:00:00.000Z"
+    }
+  ]
+}
+```
+</CodeGroup>
+
+### Siparis Detayi Getirme
+
+<CodeGroup>
+```bash Istek
+curl http://localhost:3001/orders/550e8400-e29b-41d4-a716-446655440000
+```
+
+```json Yanit (200)
+{
+  "success": true,
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "customerName": "Ahmet Yilmaz",
+    "customerEmail": "ahmet@example.com",
+    "items": [
+      { "productId": "p1", "name": "Laptop", "quantity": 1, "price": 15000 }
+    ],
+    "totalAmount": 15000,
+    "status": "pending",
+    "createdAt": "2026-03-03T10:00:00.000Z",
+    "updatedAt": "2026-03-03T10:00:00.000Z"
+  }
+}
+```
+
+```json Yanit (404)
+{
+  "success": false,
+  "error": "Order not found"
+}
+```
+</CodeGroup>
+
+### Siparis Olusturma
+
+<CodeGroup>
+```bash Istek
+curl -X POST http://localhost:3001/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerName": "Ahmet Yilmaz",
+    "customerEmail": "ahmet@example.com",
+    "items": [
+      { "productId": "p1", "name": "Laptop", "quantity": 1, "price": 15000 },
+      { "productId": "p2", "name": "Mouse", "quantity": 2, "price": 250 }
+    ]
+  }'
+```
+
+```json Yanit (201)
+{
+  "success": true,
+  "data": {
+    "id": "generated-uuid",
+    "customerName": "Ahmet Yilmaz",
+    "customerEmail": "ahmet@example.com",
+    "items": [...],
+    "totalAmount": 15500,
+    "status": "pending",
+    "createdAt": "2026-03-03T10:00:00.000Z",
+    "updatedAt": "2026-03-03T10:00:00.000Z"
+  }
+}
+```
+</CodeGroup>
+
+### Siparis Guncelleme
+
+<CodeGroup>
+```bash Istek
+curl -X PATCH http://localhost:3001/orders/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "shipped" }'
+```
+
+```json Yanit (200)
+{
+  "success": true,
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "shipped",
+    "updatedAt": "2026-03-03T12:00:00.000Z"
+  }
+}
+```
+</CodeGroup>
+
+### Checkout (Saga Tabanli)
+
+<CodeGroup>
+```bash Istek
+curl -X POST http://localhost:3001/orders/checkout \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerName": "Ahmet Yilmaz",
+    "customerEmail": "ahmet@example.com",
+    "items": [
+      { "productId": "p1", "name": "Laptop", "quantity": 1, "price": 15000 }
+    ]
+  }'
+```
+
+```json Basarili Yanit (201)
+{
+  "success": true,
+  "data": {
+    "id": "generated-uuid",
+    "customerName": "Ahmet Yilmaz",
+    "status": "confirmed",
+    "totalAmount": 15000,
+    "paymentId": "payment-transaction-uuid"
+  }
+}
+```
+
+```json Basarisiz Yanit (422)
+{
+  "success": false,
+  "error": "Insufficient stock for p1 (need 1, have 0)"
+}
+```
+</CodeGroup>
+
+## Zod Dogrulama Semalari
+
+Gelen istek verileri Zod ile dogrulanir:
+
+```typescript
+// services/order-service/src/validation.ts
+import { z } from "zod";
+
+const orderItemSchema = z.object({
+  productId: z.string().min(1),
+  name: z.string().min(1),
+  quantity: z.number().int().positive(),
+  price: z.number().positive(),
+});
+
+export const createOrderSchema = z.object({
+  customerName: z.string().min(1),
+  customerEmail: z.string().email(),
+  items: z.array(orderItemSchema).min(1),
+});
+
+export const updateOrderSchema = z.object({
+  customerName: z.string().min(1).optional(),
+  customerEmail: z.string().email().optional(),
+  status: z.enum([
+    "pending", "confirmed", "processing",
+    "shipped", "delivered", "cancelled",
+  ]).optional(),
+});
+```
+
+## Checkout Saga Akisi
+
+Checkout endpoint'i, **Saga pattern** (saga deseni) kullanarak siparis surecini yonetir. Her adim basarisiz olursa, tamamlanmis adimlar ters sirada telafi edilir (compensate).
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant OS as Order Service
+    participant IS as Inventory Service
+    participant PAY as Payment (Mock)
+
+    C->>OS: POST /orders/checkout
+
+    loop Her urun icin
+        OS->>IS: GET /products/{id} (stok kontrol)
+        IS-->>OS: Stok durumu
+    end
+
+    alt Yeterli stok var
+        loop Her urun icin
+            OS->>IS: PATCH /products/{id} (stok rezerve)
+            IS-->>OS: Onay
+        end
+
+        OS->>PAY: Odeme islemi
+
+        alt Odeme basarili
+            OS->>OS: Siparis olustur (confirmed)
+            OS-->>C: 201 Created + paymentId
+        else Odeme basarisiz
+            OS->>IS: Stok geri birak (compensate)
+            OS-->>C: 422 Hata
+        end
+    else Yetersiz stok
+        OS-->>C: 422 Hata
+    end
+```
+
+### Saga Adim Yapisi
+
+```typescript
+// services/order-service/src/saga/order-saga.ts
+interface SagaStep {
+  name: string;
+  execute: () => Promise<void>;
+  compensate: () => Promise<void>;
+}
+```
+
+Saga uc ana adimdan olusur:
+
+<Steps>
+  <Step title="Stok Kontrolu (Check Stock)">
+    Her urun icin Inventory Service'e HTTP istegi gonderilir. Urundeki mevcut stok, istenen miktardan az ise saga basarisiz olur.
+  </Step>
+  <Step title="Stok Rezervasyonu (Reserve Stock)">
+    `PATCH /products/{id}` ile stok miktari negatif `stockChange` degeri ile azaltilir. Basarisiz olursa `releaseStock` ile telafi edilir.
+  </Step>
+  <Step title="Odeme Isleme (Process Payment)">
+    Mock odeme islemi gerceklestirilir (%90 basari orani). Basarisiz olursa odeme iade edilir ve onceki adimlar telafi edilir.
+  </Step>
+</Steps>
+
+<Warning>
+  Saga basarisiz oldugunda, tamamlanmis tum adimlar **ters sirada** telafi edilir. Bu, verilerin tutarli kalmasini saglar. Ornegin, odeme basarisiz olursa, once odeme iade edilir, sonra rezerve edilen stoklar geri birakilir.
+</Warning>
+
+## Write-Through Cache Deseni
+
+Order Service, **write-through cache** deseni kullanir. Her yazma islemi oncelikle veritabanina, ardindan Redis cache'e yapilir.
+
+```mermaid
+graph LR
+    REQ[Istek] --> DB[(PostgreSQL)]
+    DB --> CACHE[(Redis Cache)]
+    CACHE --> RES[Yanit]
+```
+
+```typescript
+// services/order-service/src/cache.ts
+const CACHE_TTL = 300; // 5 dakika
+const ORDER_PREFIX = "order:";
+const ORDER_LIST_KEY = "orders:all";
+
+export const cache = {
+  async setOrder(order: Order): Promise<void> {
+    await redis.set(
+      `${ORDER_PREFIX}${order.id}`,
+      JSON.stringify(order),
+      "EX", CACHE_TTL
+    );
+    // Tek bir siparis degistiginde liste cache'ini gecersiz kil
+    await redis.del(ORDER_LIST_KEY);
+  },
+
+  async getOrder(id: string): Promise<Order | null> {
+    const data = await redis.get(`${ORDER_PREFIX}${id}`);
+    return data ? JSON.parse(data) : null;
+  },
+
+  async getOrderList(): Promise<Order[] | null> {
+    const data = await redis.get(ORDER_LIST_KEY);
+    return data ? JSON.parse(data) : null;
+  },
+
+  async setOrderList(orders: Order[]): Promise<void> {
+    await redis.set(ORDER_LIST_KEY, JSON.stringify(orders), "EX", CACHE_TTL);
+  },
+};
+```
+
+| Parametre       | Deger                    |
+|-----------------|--------------------------|
+| Cache TTL       | 300 saniye (5 dakika)    |
+| Siparis anahtari| `order:{id}`             |
+| Liste anahtari  | `orders:all`             |
+| Gecersiz kilma  | Tek siparis degisiminde liste cache'i silinir |
+
+## Event Publishing (Olay Yayinlama)
+
+Siparis olusturuldugunda veya guncellendiginde, RabbitMQ uzerinden olay yayinlanir:
+
+```typescript
+// services/order-service/src/events/producer.ts
+export function publishOrderCreated(order: Order): void {
+  const event: OrderEvent = {
+    id: crypto.randomUUID(),
+    type: "order.created",
+    timestamp: new Date().toISOString(),
+    data: order,
+  };
+
+  channel.publish(
+    EXCHANGES.ORDERS,          // "orders.exchange"
+    ROUTING_KEYS.ORDER_CREATED, // "order.created"
+    Buffer.from(JSON.stringify(event)),
+    { persistent: true, contentType: "application/json" },
+  );
+}
+```
+
+| Exchange            | Routing Key       | Aciklama                 |
+|---------------------|-------------------|--------------------------|
+| `orders.exchange`   | `order.created`   | Yeni siparis olusturuldu |
+| `orders.exchange`   | `order.updated`   | Siparis guncellendi      |
+
+<Tip>
+  Mesajlar `persistent: true` olarak yayinlanir, bu sayede RabbitMQ yeniden baslatilsa bile mesajlar kaybolmaz.
+</Tip>
+
+## Rate Limiting
+
+Order Service kendi icinde de rate limiting uygular:
+
+| Parametre       | Deger              |
+|-----------------|---------------------|
+| Pencere suresi  | 60 saniye           |
+| Maksimum istek  | 100 istek / dakika  |
+| Anahtar formati | `ratelimit:{ip}`    |
+| Kapsam          | `/orders` ve `/orders/*` rotalari |
+
+## Ortam Degiskenleri
+
+| Degisken               | Varsayilan                                         | Aciklama                    |
+|------------------------|----------------------------------------------------|-----------------------------|
+| `DATABASE_URL`         | `postgres://postgres:postgres@localhost:5432/orders`| Primary veritabani          |
+| `DATABASE_REPLICA_URL` | `DATABASE_URL` ile ayni                            | Replica veritabani (okuma)  |
+| `REDIS_URL`            | `redis://localhost:6379`                            | Cache ve rate limiter       |
+| `RABBITMQ_URL`         | `amqp://guest:guest@localhost:5672`                 | RabbitMQ baglantisi         |
+| `INVENTORY_SERVICE_URL`| `http://localhost:3003`                             | Saga stok kontrolu icin     |
+| `APM_SERVICE_NAME`     | `unknown`                                          | APM servis adi              |
+| `APM_SERVER_URL`       | -                                                  | APM sunucu adresi           |

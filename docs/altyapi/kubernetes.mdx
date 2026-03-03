@@ -1,0 +1,423 @@
+---
+title: "Kubernetes & Helm"
+description: "Helm chart yapisi, HPA, Ingress ve Kubernetes kaynaklarinin yapilandirilmasi"
+---
+
+# Kubernetes ve Helm ile Orkestrasyon
+
+Proje, Kubernetes uzerinde deploy (dagitim) icin Helm chart (Helm sablon paketi) kullanir. Helm chart, tum servislerin Deployment, Service, ConfigMap, Secret, HPA ve Ingress kaynaklarini icerir.
+
+<Note>
+  Chart surumu `0.1.0`, uygulama surumu `1.0.0` olarak belirlenmistir. Namespace (ad alani) varsayilan olarak `ecommerce-dev` seklindedir; CI/CD pipeline uretim ortaminda `ecommerce-prod` kullanir.
+</Note>
+
+## Helm Chart Dizin Yapisi
+
+```
+infrastructure/k8s/helm/ecommerce/
+├── Chart.yaml              # Chart meta bilgileri
+├── values.yaml             # Varsayilan yapilandirma degerleri
+└── templates/
+    ├── _helpers.tpl         # Yardimci sablon fonksiyonlari
+    ├── configmap.yaml       # Ortam degiskenleri (hassas olmayan)
+    ├── secrets.yaml         # Hassas veriler (sifreler, tokenlar)
+    ├── deployment.yaml      # Deployment + Service tanimlari (5 servis)
+    ├── hpa.yaml             # HorizontalPodAutoscaler (otomatik olcekleme)
+    └── ingress.yaml         # Ingress (dis erisim) kurallari
+```
+
+## Kubernetes Kaynak Diyagrami
+
+```mermaid
+graph TB
+    subgraph Ingress
+        ING[Ingress\necommerce.local\nnginx class]
+    end
+
+    subgraph Deployments
+        GW[api-gateway\n2 replica]
+        OS[order-service\n2-10 replica]
+        NS[notification-service\n1 replica]
+        IS[inventory-service\n1 replica]
+        SS[search-service\n1 replica]
+    end
+
+    subgraph Services
+        GW_SVC[Service\n:3000]
+        OS_SVC[Service\n:3001]
+        NS_SVC[Service\n:3002]
+        IS_SVC[Service\n:3003]
+        SS_SVC[Service\n:3004]
+    end
+
+    subgraph Config
+        CM[ConfigMap\necommerce-config]
+        SEC[Secret\necommerce-secrets]
+    end
+
+    subgraph Autoscaling
+        HPA[HPA\norder-service\nCPU %70]
+    end
+
+    ING --> GW_SVC
+    GW_SVC --> GW
+    OS_SVC --> OS
+    NS_SVC --> NS
+    IS_SVC --> IS
+    SS_SVC --> SS
+
+    HPA --> OS
+
+    CM -.-> GW
+    CM -.-> OS
+    CM -.-> NS
+    CM -.-> IS
+    CM -.-> SS
+
+    SEC -.-> GW
+    SEC -.-> OS
+    SEC -.-> NS
+    SEC -.-> IS
+    SEC -.-> SS
+
+    style ING fill:#F59E0B,color:#000
+    style HPA fill:#10B981,color:#fff
+    style CM fill:#3B82F6,color:#fff
+    style SEC fill:#EF4444,color:#fff
+```
+
+## values.yaml Yapilandirmasi
+
+`values.yaml` dosyasi, chart'in tum yapilandirma degerlerini icerir:
+
+<Tabs>
+  <Tab title="Global ve Servisler">
+    ```yaml
+    global:
+      imageRegistry: ecommerce       # Container registry adresi
+      imageTag: latest                # Varsayilan imaj etiketi
+      namespace: ecommerce-dev        # Kubernetes namespace
+
+    services:
+      apiGateway:
+        replicas: 2                   # Yuksek erislebilirlik icin 2 kopya
+        port: 3000
+        resources:
+          requests: { cpu: 100m, memory: 128Mi }
+          limits: { cpu: 500m, memory: 256Mi }
+
+      orderService:
+        replicas: 2
+        port: 3001
+        hpa:                          # Otomatik yatay olcekleme
+          enabled: true
+          minReplicas: 2
+          maxReplicas: 10
+          cpuUtilization: 70          # CPU %70 esigi
+        resources:
+          requests: { cpu: 100m, memory: 128Mi }
+          limits: { cpu: 500m, memory: 256Mi }
+
+      notificationService:
+        replicas: 1
+        port: 3002
+        resources:
+          requests: { cpu: 50m, memory: 128Mi }
+          limits: { cpu: 250m, memory: 256Mi }
+
+      inventoryService:
+        replicas: 1
+        port: 3003
+        resources:
+          requests: { cpu: 50m, memory: 128Mi }
+          limits: { cpu: 250m, memory: 256Mi }
+
+      searchService:
+        replicas: 1
+        port: 3004
+        resources:
+          requests: { cpu: 50m, memory: 128Mi }
+          limits: { cpu: 250m, memory: 256Mi }
+    ```
+  </Tab>
+  <Tab title="Ingress ve Config">
+    ```yaml
+    ingress:
+      enabled: true
+      host: ecommerce.local           # Dis erisim alan adi
+      className: nginx                # Ingress controller sinifi
+
+    config:
+      nodeEnv: production
+      rabbitmqUrl: amqp://guest:guest@rabbitmq:5672
+      redisUrl: redis://redis:6379
+      databaseUrl: postgres://postgres:postgres@postgres:5432/orders
+      mongodbUrl: mongodb://mongo:27017/notifications
+      elasticsearchUrl: http://elasticsearch:9200
+      apmServerUrl: http://apm-server:8200
+
+    secrets:
+      postgresPassword: postgres
+      authSecret: super-secret-key-change-in-production
+    ```
+  </Tab>
+</Tabs>
+
+## Deployment ve Service Sablonu
+
+Deployment sablonu, 5 servisi tek bir dosyada `range` dongusu ile olusturur. Her servis icin bir Deployment ve bir ClusterIP Service tanimlanir:
+
+```yaml
+# templates/deployment.yaml (kisaltilmis)
+{{- range $name, $svc := $services }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.global.namespace }}
+spec:
+  replicas: {{ $svc.replicas }}
+  template:
+    spec:
+      containers:
+        - name: {{ $name }}
+          image: {{ $.Values.global.imageRegistry }}/{{ $name }}:{{ $.Values.global.imageTag }}
+          ports:
+            - containerPort: {{ $svc.port }}
+          envFrom:
+            - configMapRef:
+                name: ecommerce-config
+            - secretRef:
+                name: ecommerce-secrets
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ $svc.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ $svc.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: {{ $svc.resources.requests.cpu }}
+              memory: {{ $svc.resources.requests.memory }}
+            limits:
+              cpu: {{ $svc.resources.limits.cpu }}
+              memory: {{ $svc.resources.limits.memory }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+spec:
+  selector:
+    app: {{ $name }}
+  ports:
+    - port: {{ $svc.port }}
+      targetPort: {{ $svc.port }}
+{{- end }}
+```
+
+<Tip>
+  Her Pod'a `livenessProbe` ve `readinessProbe` tanimlanmistir. `readinessProbe` 5 saniye aralikla `/health` endpoint'ini kontrol eder; basarisiz olan Pod'lar Service'den cikarilir. `livenessProbe` ise 15 saniye aralikla kontrol eder ve yanit veremeyen Pod'lari yeniden baslatir.
+</Tip>
+
+## HPA (HorizontalPodAutoscaler)
+
+Order Service icin HPA (Yatay Pod Otomatik Olcekleyici) etkinlestirilmistir. CPU kullanimi belirli bir esigi astiginda otomatik olarak yeni Pod'lar olusturulur:
+
+```yaml
+# templates/hpa.yaml
+{{- if .Values.services.orderService.hpa.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service-hpa
+  namespace: {{ .Values.global.namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-service
+  minReplicas: {{ .Values.services.orderService.hpa.minReplicas }}  # 2
+  maxReplicas: {{ .Values.services.orderService.hpa.maxReplicas }}  # 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.services.orderService.hpa.cpuUtilization }}  # 70
+{{- end }}
+```
+
+| Parametre | Deger | Aciklama |
+|-----------|-------|----------|
+| `minReplicas` | 2 | Minimum Pod sayisi (yuk olmasa bile) |
+| `maxReplicas` | 10 | Maksimum Pod sayisi (tepe yuku) |
+| `cpuUtilization` | %70 | Bu eşik asildiginda yeni Pod eklenir |
+
+<Warning>
+  HPA'nin calisabilmesi icin Kubernetes cluster'inda **Metrics Server** kurulu olmalidir. Metrics Server olmadan CPU metrik verileri toplanamaz ve olcekleme gerceklesmez.
+</Warning>
+
+## Ingress Yapilandirmasi
+
+Dis dunyadan gelen trafik, NGINX Ingress Controller uzerinden API Gateway'e yonlendirilir:
+
+```yaml
+# templates/ingress.yaml
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ecommerce-ingress
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: {{ .Values.ingress.className }}  # nginx
+  rules:
+    - host: {{ .Values.ingress.host }}  # ecommerce.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: {{ .Values.services.apiGateway.port }}  # 3000
+{{- end }}
+```
+
+```mermaid
+graph LR
+    Client[Dis Istemci] --> ING[NGINX Ingress\necommerce.local]
+    ING --> GW[api-gateway:3000]
+    GW --> OS[order-service:3001]
+    GW --> NS[notification-service:3002]
+    GW --> IS[inventory-service:3003]
+    GW --> SS[search-service:3004]
+```
+
+<Tip>
+  Yerel gelistirme icin `ecommerce.local` adresini `/etc/hosts` dosyasina eklemeyi unutmayin:
+  ```
+  127.0.0.1 ecommerce.local
+  ```
+</Tip>
+
+## ConfigMap ve Secret
+
+Ortam degiskenleri iki ayri Kubernetes kaynaginda yonetilir:
+
+<Tabs>
+  <Tab title="ConfigMap (Hassas Olmayan)">
+    ```yaml
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: ecommerce-config
+    data:
+      NODE_ENV: "production"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672"
+      REDIS_URL: "redis://redis:6379"
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/orders"
+      MONGODB_URL: "mongodb://mongo:27017/notifications"
+      ELASTICSEARCH_URL: "http://elasticsearch:9200"
+      APM_SERVER_URL: "http://apm-server:8200"
+      ORDER_SERVICE_URL: "http://order-service:3001"
+      NOTIFICATION_SERVICE_URL: "http://notification-service:3002"
+      INVENTORY_SERVICE_URL: "http://inventory-service:3003"
+      SEARCH_SERVICE_URL: "http://search-service:3004"
+    ```
+  </Tab>
+  <Tab title="Secret (Hassas)">
+    ```yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: ecommerce-secrets
+    type: Opaque
+    stringData:
+      POSTGRES_PASSWORD: "postgres"
+      AUTH_SECRET: "super-secret-key-change-in-production"
+    ```
+
+    <Warning>
+      Uretim ortaminda Secret degerleri git reposunda saklanmamalidir. Bunun yerine **Sealed Secrets**, **External Secrets Operator** veya **HashiCorp Vault** gibi cozumler kullanin.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Helm Komutlari
+
+<Steps>
+  <Step title="Chart'i Dogrulama">
+    Yapilandirma hatalarini onceden tespit etmek icin `template` ve `lint` komutlarini calistirin:
+
+    ```bash
+    # Sablonlari render edip kontrol edin
+    helm template ecommerce ./infrastructure/k8s/helm/ecommerce
+
+    # Lint ile yapilandirma kontrolu
+    helm lint ./infrastructure/k8s/helm/ecommerce
+    ```
+  </Step>
+  <Step title="Ilk Kurulum">
+    Chart'i cluster'a ilk kez kurun:
+
+    ```bash
+    helm install ecommerce ./infrastructure/k8s/helm/ecommerce \
+      --namespace ecommerce-dev \
+      --create-namespace
+    ```
+  </Step>
+  <Step title="Guncelleme (Upgrade)">
+    Yapilandirma degisikliklerini veya yeni imaj surumlerini uygulayin:
+
+    ```bash
+    helm upgrade ecommerce ./infrastructure/k8s/helm/ecommerce \
+      --namespace ecommerce-dev \
+      --set global.imageTag=abc123def
+    ```
+  </Step>
+  <Step title="Durum Kontrolu">
+    Deploy edilen kaynaklarin durumunu kontrol edin:
+
+    ```bash
+    # Helm release durumu
+    helm status ecommerce -n ecommerce-dev
+
+    # Pod durumu
+    kubectl get pods -n ecommerce-dev
+
+    # HPA durumu
+    kubectl get hpa -n ecommerce-dev
+    ```
+  </Step>
+  <Step title="Kaldirma (Rollback/Uninstall)">
+    ```bash
+    # Onceki surume geri donme
+    helm rollback ecommerce 1 -n ecommerce-dev
+
+    # Tamamen kaldirma
+    helm uninstall ecommerce -n ecommerce-dev
+    ```
+  </Step>
+</Steps>
+
+## Kaynak Limitleri Ozeti
+
+| Servis | CPU Request | CPU Limit | Memory Request | Memory Limit | Replica |
+|--------|------------|-----------|----------------|--------------|---------|
+| api-gateway | 100m | 500m | 128Mi | 256Mi | 2 |
+| order-service | 100m | 500m | 128Mi | 256Mi | 2-10 (HPA) |
+| notification-service | 50m | 250m | 128Mi | 256Mi | 1 |
+| inventory-service | 50m | 250m | 128Mi | 256Mi | 1 |
+| search-service | 50m | 250m | 128Mi | 256Mi | 1 |

@@ -1,0 +1,348 @@
+---
+title: "API Gateway"
+description: "Tum istemci isteklerinin tek giris noktasi. Kimlik dogrulama, rate limiting, circuit breaker ve servis yonlendirme islemlerini yonetir."
+---
+
+# API Gateway
+
+API Gateway, tum disaridan gelen HTTP isteklerinin tek giris noktasidir. Istemciler dogrudan arka plan servislerine erisemez; tum trafik bu gateway uzerinden gecmek zorundadir.
+
+**Port:** 3000
+**Framework:** Hono.dev
+**Runtime:** Bun
+
+## Middleware Yigini
+
+Her istek, asagidaki middleware zincirinden sirasiyla gecer:
+
+```mermaid
+graph LR
+    REQ[Gelen Istek] --> CORS[CORS]
+    CORS --> APM[APM Middleware]
+    APM --> MET[Metrics Middleware]
+    MET --> RL[Rate Limiter]
+    RL --> AUTH[Auth Guard]
+    AUTH --> CB[Circuit Breaker]
+    CB --> SVC[Arka Plan Servisi]
+```
+
+<Steps>
+  <Step title="CORS">
+    Tum kaynaklardan gelen isteklere izin verir. `cors()` middleware'i global olarak uygulanir.
+  </Step>
+  <Step title="APM Middleware">
+    Her istek icin benzersiz `traceId` ve `spanId` olusturur. Dagitik izleme (distributed tracing) icin gerekli header'lari ayarlar.
+  </Step>
+  <Step title="Metrics Middleware">
+    HTTP isteklerinin method, path, status code ve sure bilgilerini toplar. Prometheus formatinda `/metrics` endpoint'inden sunar.
+  </Step>
+  <Step title="Rate Limiter">
+    `/api/*` altindaki tum rotalar icin IP bazli istek sinirlandirma uygular. Redis tabanli, dakikada **200 istek** limiti.
+  </Step>
+  <Step title="Auth Guard">
+    Korunmus rotalarda Better Auth oturumunu dogrular. Gecersiz oturumlarda `401 Unauthorized` doner.
+  </Step>
+  <Step title="Circuit Breaker">
+    Her arka plan servisi icin ayri bir devre kesici. Proxy istegi sirasinda otomatik devreye girer.
+  </Step>
+</Steps>
+
+### Middleware Kaynak Kodu
+
+```typescript
+// services/api-gateway/src/routes.ts
+const app = new Hono();
+
+// Global middleware
+app.use("*", cors());
+app.use("*", apmMiddleware());
+app.use("*", metricsMiddleware());
+app.use("/api/*", gatewayRateLimiter);
+```
+
+## Kimlik Dogrulama (Better Auth)
+
+Gateway, **Better Auth** kutuphanesi ile kimlik dogrulama islemlerini yonetir. Uc farkli giris yontemi desteklenir:
+
+<Tabs>
+  <Tab title="E-posta / Sifre">
+    Standart e-posta ve sifre ile kayit olma ve giris yapma.
+
+    ```bash
+    # Kayit
+    curl -X POST http://localhost:3000/api/auth/sign-up/email \
+      -H "Content-Type: application/json" \
+      -d '{"email": "kullanici@example.com", "password": "sifre123", "name": "Ahmet"}'
+
+    # Giris
+    curl -X POST http://localhost:3000/api/auth/sign-in/email \
+      -H "Content-Type: application/json" \
+      -d '{"email": "kullanici@example.com", "password": "sifre123"}'
+    ```
+  </Tab>
+  <Tab title="GitHub OAuth">
+    GitHub hesabi ile sosyal giris. `GITHUB_CLIENT_ID` ve `GITHUB_CLIENT_SECRET` ortam degiskenleri gereklidir.
+
+    ```bash
+    # GitHub ile giris baslat
+    curl http://localhost:3000/api/auth/sign-in/social?provider=github
+    ```
+  </Tab>
+  <Tab title="Google OAuth">
+    Google hesabi ile sosyal giris. `GOOGLE_CLIENT_ID` ve `GOOGLE_CLIENT_SECRET` ortam degiskenleri gereklidir.
+
+    ```bash
+    # Google ile giris baslat
+    curl http://localhost:3000/api/auth/sign-in/social?provider=google
+    ```
+  </Tab>
+</Tabs>
+
+### Auth Yapilandirmasi
+
+```typescript
+// services/api-gateway/src/auth.ts
+import { betterAuth } from "better-auth";
+import { Pool } from "pg";
+
+export const auth = betterAuth({
+  database: new Pool({
+    connectionString: process.env.DATABASE_URL
+      || "postgres://postgres:postgres@localhost:5432/orders",
+  }),
+  secret: process.env.AUTH_SECRET || "dev-secret-change-in-production",
+  baseURL: process.env.BASE_URL || "http://localhost:3000",
+  trustedOrigins: [process.env.BASE_URL || "http://localhost:3000"],
+  emailAndPassword: {
+    enabled: true,
+  },
+  socialProviders: {
+    github: {
+      clientId: process.env.GITHUB_CLIENT_ID || "",
+      clientSecret: process.env.GITHUB_CLIENT_SECRET || "",
+      enabled: !!process.env.GITHUB_CLIENT_ID,
+    },
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID || "",
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+      enabled: !!process.env.GOOGLE_CLIENT_ID,
+    },
+  },
+  session: {
+    expiresIn: 60 * 60 * 24 * 7,   // 7 gun
+    updateAge: 60 * 60 * 24,        // 1 gun
+  },
+});
+```
+
+<Note>
+  Oturum suresi varsayilan olarak **7 gun** olarak ayarlanmistir. Her gun oturum yenilenir (`updateAge: 1 gun`).
+</Note>
+
+### Auth Guard Middleware
+
+Korunmus rotalarda oturum dogrulamasi yapan middleware:
+
+```typescript
+// services/api-gateway/src/middleware/auth-guard.ts
+export async function authGuard(c: Context, next: Next) {
+  const session = await auth.api.getSession({
+    headers: c.req.raw.headers,
+  });
+
+  if (!session) {
+    return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+
+  c.set("user", session.user);
+  c.set("session", session.session);
+  await next();
+}
+```
+
+## Rate Limiting (Istek Hiz Sinirlandirma)
+
+Gateway seviyesinde Redis tabanli rate limiting uygulanir:
+
+| Parametre       | Deger                |
+|-----------------|----------------------|
+| Pencere suresi  | 60 saniye            |
+| Maksimum istek  | 200 istek / dakika   |
+| Anahtar formati | `gateway:ratelimit:{ip}` |
+| Depolama        | Redis                |
+
+```typescript
+// services/api-gateway/src/middleware/rate-limit.ts
+const WINDOW_SECONDS = 60;
+const MAX_REQUESTS = 200;
+
+export async function gatewayRateLimiter(c: Context, next: Next) {
+  const ip = c.req.header("x-forwarded-for")
+    || c.req.header("x-real-ip") || "unknown";
+  const key = `gateway:ratelimit:${ip}`;
+
+  const current = await redis.incr(key);
+  if (current === 1) {
+    await redis.expire(key, WINDOW_SECONDS);
+  }
+
+  c.header("X-RateLimit-Limit", String(MAX_REQUESTS));
+  c.header("X-RateLimit-Remaining", String(Math.max(0, MAX_REQUESTS - current)));
+  c.header("X-RateLimit-Reset", String(ttl));
+
+  if (current > MAX_REQUESTS) {
+    return c.json({ success: false, error: "Too many requests" }, 429);
+  }
+
+  await next();
+}
+```
+
+Yanit header'larinda su bilgiler doner:
+
+- `X-RateLimit-Limit` - Toplam izin verilen istek sayisi
+- `X-RateLimit-Remaining` - Kalan istek hakki
+- `X-RateLimit-Reset` - Pencerenin sifirlanmasina kalan sure (saniye)
+
+## Circuit Breaker (Devre Kesici)
+
+Her arka plan servisi icin bagimsiz bir circuit breaker instance'i olusturulur. Bu, bir servisin cokus durumunda diger servislerin etkilenmesini onler.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open : 5 ardisik hata
+    Open --> HalfOpen : 30 sn sonra
+    HalfOpen --> Closed : Basarili istek
+    HalfOpen --> Open : Basarisiz istek
+```
+
+| Parametre          | Deger       |
+|--------------------|-------------|
+| Hata esigi         | 5 ardisik hata |
+| Sifirlama suresi   | 30 saniye   |
+| Durumlar           | closed, open, half-open |
+
+```typescript
+// services/api-gateway/src/middleware/circuit-breaker.ts
+class CircuitBreaker {
+  private state: State = "closed";
+  private failureCount = 0;
+  private lastFailureTime = 0;
+
+  async call<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.state === "open") {
+      if (Date.now() - this.lastFailureTime > this.resetTimeout) {
+        this.state = "half-open";
+      } else {
+        throw new Error("Circuit breaker is OPEN - service unavailable");
+      }
+    }
+
+    try {
+      const result = await fn();
+      this.onSuccess();
+      return result;
+    } catch (err) {
+      this.onFailure();
+      throw err;
+    }
+  }
+}
+
+// Her servis icin ayri bir breaker instance'i
+const breakers: Record<string, CircuitBreaker> = {};
+
+export function getBreaker(service: string): CircuitBreaker {
+  if (!breakers[service]) {
+    breakers[service] = new CircuitBreaker({
+      failureThreshold: 5,
+      resetTimeout: 30_000,
+    });
+  }
+  return breakers[service];
+}
+```
+
+<Warning>
+  Circuit breaker **open** durumundayken, ilgili servise yapilan tum istekler aninda `503 Service Unavailable` ile reddedilir. Bu, cascade failure (zincirleme cokus) riskini azaltir.
+</Warning>
+
+## Rota Yonlendirme Tablosu
+
+Gateway, gelen istekleri ilgili arka plan servislerine yonlendirir:
+
+| Gateway Rotasi               | Hedef Servis          | Hedef Yol              | Kimlik Dogrulama |
+|------------------------------|-----------------------|------------------------|------------------|
+| `GET/POST /api/auth/**`      | -                     | Better Auth handler    | Hayir            |
+| `* /api/orders/checkout`     | order-service         | `/orders/checkout`     | Evet             |
+| `* /api/orders`              | order-service         | `/orders`              | Evet             |
+| `* /api/orders/:id`          | order-service         | `/orders/:id`          | Evet             |
+| `* /api/search`              | search-service        | `/search`              | Evet             |
+| `* /api/search/stats`        | search-service        | `/search/stats`        | Evet             |
+| `* /api/notifications`       | notification-service  | `/notifications`       | Evet             |
+| `* /api/notifications/:id`   | notification-service  | `/notifications/:id`   | Evet             |
+| `* /api/products`            | inventory-service     | `/products`            | Evet             |
+| `* /api/products/:id`        | inventory-service     | `/products/:id`        | Evet             |
+| `GET /metrics`               | -                     | Prometheus metrikleri  | Hayir            |
+| `GET /health`                | -                     | Saglik kontrolu        | Hayir            |
+
+### Proxy Mekanizmasi
+
+Gateway, gelen istekleri arka plan servislerine yonlendirirken circuit breaker uzerinden gecer ve trace header'larini iletir:
+
+```typescript
+// services/api-gateway/src/proxy.ts
+const SERVICE_URLS: Record<string, string> = {
+  "order-service":        process.env.ORDER_SERVICE_URL        || "http://localhost:3001",
+  "notification-service": process.env.NOTIFICATION_SERVICE_URL || "http://localhost:3002",
+  "inventory-service":    process.env.INVENTORY_SERVICE_URL    || "http://localhost:3003",
+  "search-service":       process.env.SEARCH_SERVICE_URL       || "http://localhost:3004",
+};
+
+export async function proxyRequest(
+  c: Context, serviceName: string, path: string,
+): Promise<Response> {
+  const breaker = getBreaker(serviceName);
+  const baseUrl = SERVICE_URLS[serviceName];
+
+  const response = await breaker.call(async () => {
+    const url = `${baseUrl}${path}`;
+    const headers = new Headers(c.req.raw.headers);
+
+    // Trace header'larini ileri yonlendir
+    const traceId = c.get("traceId");
+    if (traceId) headers.set("x-trace-id", traceId);
+
+    return fetch(url, { method: c.req.method, headers });
+  });
+
+  return new Response(response.body, {
+    status: response.status,
+    headers: response.headers,
+  });
+}
+```
+
+<Tip>
+  Servis URL'leri ortam degiskenleri ile yapilandirilabilir. Docker Compose veya Kubernetes ortaminda servis adlari ile DNS cozumlemesi kullanilir.
+</Tip>
+
+## Ortam Degiskenleri
+
+| Degisken                     | Varsayilan                                         | Aciklama                     |
+|------------------------------|----------------------------------------------------|-----------------------------|
+| `DATABASE_URL`               | `postgres://postgres:postgres@localhost:5432/orders`| Auth veritabani             |
+| `AUTH_SECRET`                | `dev-secret-change-in-production`                  | Oturum sifreleme anahtari   |
+| `BASE_URL`                   | `http://localhost:3000`                             | Gateway dis URL'si          |
+| `REDIS_URL`                  | `redis://localhost:6379`                            | Rate limiter icin Redis     |
+| `GITHUB_CLIENT_ID`           | -                                                  | GitHub OAuth istemci ID     |
+| `GITHUB_CLIENT_SECRET`       | -                                                  | GitHub OAuth gizli anahtar  |
+| `GOOGLE_CLIENT_ID`           | -                                                  | Google OAuth istemci ID     |
+| `GOOGLE_CLIENT_SECRET`       | -                                                  | Google OAuth gizli anahtar  |
+| `ORDER_SERVICE_URL`          | `http://localhost:3001`                             | Order Service adresi        |
+| `NOTIFICATION_SERVICE_URL`   | `http://localhost:3002`                             | Notification Service adresi |
+| `INVENTORY_SERVICE_URL`      | `http://localhost:3003`                             | Inventory Service adresi    |
+| `SEARCH_SERVICE_URL`         | `http://localhost:3004`                             | Search Service adresi       |
+| `APM_SERVER_URL`             | -                                                  | APM sunucu adresi           |
+| `APM_SERVICE_NAME`           | `unknown`                                          | APM'de gorunecek servis adi |

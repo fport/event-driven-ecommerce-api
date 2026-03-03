@@ -1,0 +1,372 @@
+---
+title: "Dead Letter Queue"
+description: "Islenemeyen mesajlarin yonetimi icin DLQ ve yeniden deneme mekanizmasi"
+---
+
+# Dead Letter Queue (Olu Mektup Kuyrugu)
+
+Dead Letter Queue (DLQ), mesaj kuyrugu sistemlerinde islenemeyen mesajlarin yonlendirildigi
+ozel bir kuyruktur. Bir mesaj belirlenen sayida basarisiz isleme denemesinden sonra ana
+kuyruktan cikarilir ve DLQ'ya tasinir. Bu yaklasim, hatali mesajlarin sonsuz donguye girmesini
+onler ve manuel inceleme imkani saglar.
+
+Bu projede DLQ mekanizmasi **RabbitMQ** uzerinde uygulanmistir. Her ana kuyruk icin bir
+Dead Letter Exchange (DLX) tanimlanmis ve basarisiz mesajlar 3 yeniden deneme (retry)
+sonrasinda bu exchange uzerinden DLQ'ya yonlendirilmektedir.
+
+<CardGroup cols={3}>
+  <Card title="3 Yeniden Deneme" icon="rotate">
+    Her mesaj en fazla **3 kez** yeniden islemeye alinir
+  </Card>
+  <Card title="x-retry-count Header" icon="hashtag">
+    Deneme sayisi mesaj basliginda (header) takip edilir
+  </Card>
+  <Card title="Manuel Inceleme" icon="magnifying-glass">
+    DLQ'daki mesajlar manuel olarak incelenir ve gerekirse yeniden islenir
+  </Card>
+</CardGroup>
+
+---
+
+## DLQ Mimarisi
+
+### Exchange ve Kuyruk Yapisi
+
+```mermaid
+graph LR
+    subgraph Ana Yapi
+        EX["orders.exchange\n(Topic Exchange)"]
+        Q1["notification.orders\n(Ana Kuyruk)"]
+    end
+
+    subgraph Dead Letter Yapisi
+        DLX["orders.exchange.dlx\n(Fanout Exchange)"]
+        DLQ["orders.dlq\n(Dead Letter Queue)"]
+    end
+
+    subgraph Servisler
+        NS[Notification Service]
+        ADMIN[Yonetici / Manuel Inceleme]
+    end
+
+    EX -->|"order.created\norder.updated"| Q1
+    Q1 --> NS
+    NS -.->|"3 basarisiz deneme"| DLX
+    DLX --> DLQ
+    DLQ -.-> ADMIN
+```
+
+### Bilesen Tanimlari
+
+| Bilesen | Adi | Tipi | Aciklama |
+|---------|-----|------|----------|
+| Ana Exchange | `orders.exchange` | Topic | Siparis olaylarinin yayinlandigi exchange |
+| Ana Kuyruk | `notification.orders` | Durable Queue | Bildirim servisinin dinledigi kuyruk |
+| DLX | `orders.exchange.dlx` | Fanout | Basarisiz mesajlarin yonlendirildigi exchange |
+| DLQ | `orders.dlq` | Durable Queue | Islenemeyen mesajlarin toplandigi kuyruk |
+
+---
+
+## Exchange ve Kuyruk Tanimlama
+
+Notification Service basladiginda gerekli exchange ve kuyruk tanimlamalari yapilir:
+
+```typescript
+const channel = await connection.createChannel();
+
+// 1. Ana exchange (Topic Exchange)
+await channel.assertExchange(EXCHANGES.ORDERS, "topic", { durable: true });
+
+// 2. Dead Letter Exchange (Fanout - tum mesajlari DLQ'ya yonlendirir)
+await channel.assertExchange(`${EXCHANGES.ORDERS}.dlx`, "fanout", { durable: true });
+
+// 3. Ana kuyruk - DLX baglantisi ile
+await channel.assertQueue(QUEUES.NOTIFICATION_ORDERS, {
+  durable: true,
+  arguments: {
+    "x-dead-letter-exchange": `${EXCHANGES.ORDERS}.dlx`,  // Basarisiz mesajlar buraya gider
+  },
+});
+
+// 4. Routing key'lere gore kuyrugu exchange'e bagla
+await channel.bindQueue(QUEUES.NOTIFICATION_ORDERS, EXCHANGES.ORDERS, ROUTING_KEYS.ORDER_CREATED);
+await channel.bindQueue(QUEUES.NOTIFICATION_ORDERS, EXCHANGES.ORDERS, ROUTING_KEYS.ORDER_UPDATED);
+
+// 5. DLQ ve DLX baglantisi
+await channel.assertQueue(QUEUES.DLQ_ORDERS, { durable: true });
+await channel.bindQueue(QUEUES.DLQ_ORDERS, `${EXCHANGES.ORDERS}.dlx`, "");
+```
+
+<Note>
+  `durable: true` secenegi hem exchange hem kuyruk icin belirlenmistir. Bu, RabbitMQ yeniden
+  baslatilsa bile bu yapilarin kaybolmamasini saglar. Ayrica `x-dead-letter-exchange` argumanı,
+  ana kuyruktan `nack` (negative acknowledgement) ile reddedilen mesajlarin otomatik olarak
+  DLX'e yonlendirilmesini saglar.
+</Note>
+
+---
+
+## Mesaj Isleme ve Yeniden Deneme Akisi
+
+Asagidaki diyagram, bir mesajin ilk isleme denemesinden DLQ'ya tasinmasina kadar olan tam akisi
+gostermektedir:
+
+```mermaid
+flowchart TD
+    A[Mesaj kuyruktan alinir] --> B[x-retry-count header okunur]
+    B --> C{Mesaj basariyla islendi mi?}
+
+    C -->|Evet| D[channel.ack - Mesaj onaylanir]
+    D --> E[Islem Tamamlandi]
+
+    C -->|Hayir - Hata olustu| F{retryCount < 3?}
+
+    F -->|Evet| G[channel.ack - Mesaj onaylanir]
+    G --> H["Mesaj yeniden yayinlanir\nx-retry-count: retryCount + 1"]
+    H --> A
+
+    F -->|Hayir - 3 deneme tukendi| I["channel.nack(msg, false, false)"]
+    I --> J[Mesaj DLX'e yonlendirilir]
+    J --> K[orders.dlq kuyru guna eklenir]
+    K --> L[Manuel Inceleme Gerekli]
+
+    style D fill:#4ecdc4,color:#fff
+    style E fill:#4ecdc4,color:#fff
+    style L fill:#ff6b6b,color:#fff
+```
+
+---
+
+## Consumer (Tuketici) Kodu Detayli Aciklama
+
+<CodeGroup>
+```typescript consumer.ts
+import amqp from "amqplib";
+import type { OrderEvent } from "@ecommerce/shared";
+import { EXCHANGES, ROUTING_KEYS, QUEUES } from "@ecommerce/shared";
+import { getNotificationsCollection } from "./db";
+
+const MAX_RETRIES = 3;
+
+export async function startConsumer(): Promise<void> {
+  const url = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672";
+
+  // Baglanti denemesi - 10 deneme, 3 saniye aralik
+  let connection: amqp.Connection | null = null;
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      connection = await amqp.connect(url);
+      break;
+    } catch {
+      console.log(`RabbitMQ connection attempt ${attempt}/10 failed, retrying in 3s...`);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  if (!connection) throw new Error("Failed to connect to RabbitMQ");
+
+  const channel = await connection.createChannel();
+
+  // Exchange ve kuyruk tanimlari (yukarida aciklandi)
+  await channel.assertExchange(EXCHANGES.ORDERS, "topic", { durable: true });
+  await channel.assertExchange(`${EXCHANGES.ORDERS}.dlx`, "fanout", { durable: true });
+  await channel.assertQueue(QUEUES.NOTIFICATION_ORDERS, {
+    durable: true,
+    arguments: { "x-dead-letter-exchange": `${EXCHANGES.ORDERS}.dlx` },
+  });
+  await channel.bindQueue(QUEUES.NOTIFICATION_ORDERS, EXCHANGES.ORDERS, ROUTING_KEYS.ORDER_CREATED);
+  await channel.bindQueue(QUEUES.NOTIFICATION_ORDERS, EXCHANGES.ORDERS, ROUTING_KEYS.ORDER_UPDATED);
+  await channel.assertQueue(QUEUES.DLQ_ORDERS, { durable: true });
+  await channel.bindQueue(QUEUES.DLQ_ORDERS, `${EXCHANGES.ORDERS}.dlx`, "");
+
+  // Prefetch: ayni anda en fazla 10 mesaj isle
+  await channel.prefetch(10);
+
+  // Mesaj tuketme dongusu
+  channel.consume(QUEUES.NOTIFICATION_ORDERS, async (msg) => {
+    if (!msg) return;
+
+    // Mevcut deneme sayisini header'dan oku (varsayilan: 0)
+    const retryCount = (msg.properties.headers?.["x-retry-count"] as number) || 0;
+
+    try {
+      // Mesaji parse et
+      const event: OrderEvent = JSON.parse(msg.content.toString());
+      console.log(`Received ${event.type} event for order ${event.data.id}`);
+
+      // MongoDB'ye bildirim kaydi olustur
+      const collection = getNotificationsCollection();
+      await collection.insertOne({
+        orderId: event.data.id,
+        customerName: event.data.customerName,
+        customerEmail: event.data.customerEmail,
+        type: event.type,
+        message: `Order ${event.data.id} - ${event.type}: ${event.data.status}`,
+        sentAt: new Date(),
+      });
+
+      console.log(`Notification saved for order ${event.data.id}`);
+      channel.ack(msg); // Basarili - mesaji onayla
+    } catch (err) {
+      console.error(`Error processing message (attempt ${retryCount + 1}):`, err);
+
+      if (retryCount < MAX_RETRIES) {
+        // Yeniden deneme: mesaji onayla ve arttirilmis sayac ile tekrar yayinla
+        channel.ack(msg);
+        channel.publish(EXCHANGES.ORDERS, msg.fields.routingKey, msg.content, {
+          ...msg.properties,
+          headers: { ...msg.properties.headers, "x-retry-count": retryCount + 1 },
+        });
+      } else {
+        // Maksimum deneme sayisina ulasildi - DLQ'ya gonder
+        console.log(`Message exceeded max retries, sending to DLQ`);
+        channel.nack(msg, false, false); // requeue: false -> DLX'e yonlendir
+      }
+    }
+  });
+
+  console.log(`Notification consumer listening on queue: ${QUEUES.NOTIFICATION_ORDERS}`);
+}
+```
+</CodeGroup>
+
+---
+
+## Yeniden Deneme Mekanizmasi Adim Adim
+
+<Steps>
+  <Step title="Mesaj Alinir">
+    Tuketici, `channel.consume()` ile kuyruktan mesaji alir. Mesajin `properties.headers`
+    alanindaki `x-retry-count` degeri okunur. Ilk denemede bu deger `0` (veya mevcut degil)
+    olur.
+  </Step>
+
+  <Step title="Mesaj Islenir">
+    Mesaj JSON olarak parse edilir ve is mantigi (MongoDB'ye yazma) calistirilir. Isleme
+    basarili olursa `channel.ack(msg)` ile mesaj onaylanir ve kuyruktan kaldirilir.
+  </Step>
+
+  <Step title="Hata Durumu - Yeniden Deneme">
+    Isleme sirasinda bir hata olusursa ve `retryCount < 3` ise:
+
+    1. Mevcut mesaj `channel.ack(msg)` ile onaylanir (kuyruktan cikarilir)
+    2. Ayni mesaj `channel.publish()` ile exchange'e **tekrar yayinlanir**
+    3. Yeni mesajin `x-retry-count` header degeri `retryCount + 1` olarak ayarlanir
+    4. Mesaj tekrar ana kuyruga duser ve islenmeye calisilir
+
+    ```typescript
+    channel.ack(msg);
+    channel.publish(EXCHANGES.ORDERS, msg.fields.routingKey, msg.content, {
+      ...msg.properties,
+      headers: { ...msg.properties.headers, "x-retry-count": retryCount + 1 },
+    });
+    ```
+  </Step>
+
+  <Step title="Maksimum Deneme Asildi - DLQ">
+    Eger `retryCount >= 3` ise mesaj artik yeniden denenmez:
+
+    1. `channel.nack(msg, false, false)` cagirilir
+    2. Ikinci parametre `false`: sadece bu mesaji etkile (multiple: false)
+    3. Ucuncu parametre `false`: kuyruga geri koyma (requeue: false)
+    4. RabbitMQ, kuyruk tanimindaki `x-dead-letter-exchange` ayarina gore mesaji DLX'e yonlendirir
+    5. DLX (fanout exchange), mesaji `orders.dlq` kuyru guna iletir
+
+    ```typescript
+    channel.nack(msg, false, false); // DLX'e yonlendir
+    ```
+  </Step>
+</Steps>
+
+---
+
+## nack Parametreleri
+
+`channel.nack(msg, allUpTo, requeue)` metodunun parametreleri:
+
+| Parametre | Deger | Aciklama |
+|-----------|-------|----------|
+| `msg` | Mesaj nesnesi | Reddedilecek mesaj |
+| `allUpTo` | `false` | `true` olursa bu mesaj ve onceki tum onaylanmamis mesajlar reddedilir. `false` olursa sadece bu mesaj reddedilir |
+| `requeue` | `false` | `true` olursa mesaj kuyruga geri konur. `false` olursa mesaj kuyruktan cikarilir ve DLX varsa oraya yonlendirilir |
+
+---
+
+## Prefetch (On Yukleme)
+
+```typescript
+await channel.prefetch(10);
+```
+
+`prefetch(10)` ayari, tuketicinin ayni anda en fazla **10 onaylanmamis mesaj** uzerinde
+calismasina izin verir. Bu:
+
+- Tuketicinin asiri yuklenmesini onler
+- Birden fazla tuketici varsa mesajlarin dengeli dagilmasini saglar
+- Bellek kullanimini kontrol altinda tutar
+
+<Tip>
+  `prefetch` degeri is yukune gore ayarlanmalidir. Cok dusuk bir deger verimlilik kaybina,
+  cok yuksek bir deger ise bellek sorunlarina yol acabilir. Genellikle 10-50 arasi bir deger
+  baslangiç icin uygundur.
+</Tip>
+
+---
+
+## Baglanti Dayanikliligi (Connection Resilience)
+
+Tuketici, RabbitMQ'ya baglanirken yeniden deneme mekanizmasi kullanir:
+
+```typescript
+let connection: amqp.Connection | null = null;
+for (let attempt = 1; attempt <= 10; attempt++) {
+  try {
+    connection = await amqp.connect(url);
+    break;
+  } catch {
+    console.log(`RabbitMQ connection attempt ${attempt}/10 failed, retrying in 3s...`);
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
+if (!connection) throw new Error("Failed to connect to RabbitMQ");
+```
+
+- **10 deneme** yapilir, her deneme arasinda **3 saniye** beklenir
+- Toplam bekleme suresi en fazla **30 saniye** olabilir
+- Docker ortaminda servisler farkli siralarda basladigindan bu mekanizma kritiktir
+
+---
+
+## Mesaj Siralamasi Uyarisi
+
+<Warning>
+  Yeniden deneme mekanizmasi, mesaj siralamasini (message ordering) **garanti etmez**. Bir mesaj
+  basarisiz olup yeniden yayinlandiginda, kuyruga yeni gelen mesajlarin **arkasina** eklenir.
+  Bu durum, olaylarin orijinal sirasindan farkli bir sirada islenmesine yol acabilir.
+
+  Ornek: `order.created` mesaji 2 kez basarisiz olursa, bu sirada gelen `order.updated` mesaji
+  daha once islenir. Eger is mantigi sira bagimli ise (order-dependent), mesaj icindeki
+  `timestamp` alani kontrol edilerek eski olaylarin gozardi edilmesi saglanmalidir.
+</Warning>
+
+---
+
+## DLQ Izleme ve Yonetim
+
+DLQ'daki mesajlar otomatik olarak islenmez. Asagidaki yontemlerle izlenebilir ve yonetilebilir:
+
+<CardGroup cols={2}>
+  <Card title="RabbitMQ Management UI" icon="desktop">
+    `http://localhost:15672` adresinden RabbitMQ yonetim arayuzune erisilebilir. `orders.dlq`
+    kuyrugundaki mesaj sayisi ve icerik buradan incelenebilir.
+  </Card>
+  <Card title="Prometheus Metrikleri" icon="chart-line">
+    DLQ kuyruk boyutu Prometheus metrikleri ile izlenir. Kuyruk boyutu belirli bir esigi astiginda
+    alert tetiklenir.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Uretim ortaminda DLQ'daki mesajlari yeniden islemek (replay) icin bir yonetim araci veya
+  CLI komutu gelistirilmelidir. Bu arac, mesajlari DLQ'dan okuyup ana kuyruga tekrar yayinlayarak
+  islenmelerini saglar.
+</Tip>

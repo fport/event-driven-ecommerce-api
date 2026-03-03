@@ -1,0 +1,378 @@
+---
+title: "DDD Kavramlari"
+description: "Domain-Driven Design prensiplerinin event-driven e-ticaret projesindeki uygulamasi"
+---
+
+# Domain-Driven Design (Alan Odakli Tasarim)
+
+Domain-Driven Design (DDD), karmasik yazilim sistemlerinin is alani (domain) bilgisine
+dayali olarak modellenmesini savunan bir yazilim gelistirme yaklasimidir. Eric Evans tarafindan
+2003 yilinda ortaya konmustur.
+
+Bu projede DDD'nin temel kavramlari, mikroservis sinirlarinin belirlenmesinde ve olay
+modellemesinde uygulanmaktadir.
+
+<Note>
+  DDD, sadece bir teknik yaklasim degil, ayni zamanda is birimi uzmanlari ile yazilim
+  gelisricileri arasindaki iletisimi güclendiren bir disiplindir.
+</Note>
+
+---
+
+## Temel DDD Kavramlari
+
+<CardGroup cols={2}>
+  <Card title="Bounded Context (Sinirli Baglam)" icon="border-all">
+    Her mikroservis, belirli bir is alanini kapsayan bir Bounded Context'tir.
+    Ayni kavram farkli baglanlarda farkli anlamlara gelebilir.
+  </Card>
+  <Card title="Aggregate Root (Kümele Koku)" icon="sitemap">
+    Bir aggregate (küme) icindeki tüm islemlerin giris noktasidir. Dis dünya
+    aggregate'e yalnizca root üzerinden erisir.
+  </Card>
+  <Card title="Domain Event (Alan Olayi)" icon="bolt">
+    Is alaninda gerceklesen anlamli bir degisikligi temsil eder. Diger bounded
+    context'lerin bu degisiklikten haberdar olmasini saglar.
+  </Card>
+  <Card title="Ubiquitous Language (Ortak Dil)" icon="comments">
+    Gelistiriciler ve is birimi uzmanlari arasinda kullanilan ortak terminoloji.
+    Kod, dokümantasyon ve konusmalar ayni dili kullanir.
+  </Card>
+</CardGroup>
+
+---
+
+## Bounded Context'ler (Sinirli Baglamlar)
+
+Bu projedeki her mikroservis, bir Bounded Context olarak tanimlanmistir. Her baglam
+kendi veri modelini, is kurallarini ve dilini icerir.
+
+```mermaid
+graph TB
+    subgraph "Order Context (Siparis Baglami)"
+        O_AGG["Aggregate Root:\nOrder"]
+        O_ENT["Entity'ler:\nOrderItem, OrderStatus"]
+        O_EVT["Domain Events:\nOrderCreated\nOrderUpdated"]
+        O_AGG --- O_ENT
+        O_AGG --- O_EVT
+    end
+
+    subgraph "Notification Context (Bildirim Baglami)"
+        N_AGG["Aggregate Root:\nNotification"]
+        N_ENT["Entity'ler:\nNotificationTemplate\nDeliveryRecord"]
+        N_AGG --- N_ENT
+    end
+
+    subgraph "Inventory Context (Envanter Baglami)"
+        I_AGG["Aggregate Root:\nStockItem"]
+        I_ENT["Entity'ler:\nReservation\nStockMovement"]
+        I_AGG --- I_ENT
+    end
+
+    subgraph "Search Context (Arama Baglami)"
+        S_AGG["Aggregate Root:\nSearchDocument"]
+        S_ENT["Entity'ler:\nSearchIndex\nSearchFilter"]
+        S_AGG --- S_ENT
+    end
+
+    O_EVT -.->|"Domain Event"| N_AGG
+    O_EVT -.->|"Domain Event"| I_AGG
+    O_EVT -.->|"Domain Event"| S_AGG
+
+    style O_AGG fill:#00b894,color:#fff
+    style N_AGG fill:#fdcb6e,color:#000
+    style I_AGG fill:#e17055,color:#fff
+    style S_AGG fill:#0984e3,color:#fff
+```
+
+### Her Context'in Ayrintili Aciklamasi
+
+<Tabs>
+  <Tab title="Order Context">
+    **Sorumluluk Alani:** Siparis yasam dongüsünün tamamini yonetir.
+
+    **Aggregate Root:** `Order`
+    - Siparis bilgilerini icerir (müsteri, ürünler, toplam tutar)
+    - Siparis durumunu yonetir (created, processing, completed, cancelled)
+    - Tüm siparis islemleri bu aggregate üzerinden gerceklestirilir
+
+    **Domain Events:**
+    - `OrderCreatedEvent` - Yeni siparis olusturuldugunda
+    - `OrderUpdatedEvent` - Siparis guncellediginde
+
+    **Veritabani:** PostgreSQL (iliskisel veri, ACID garantisi)
+  </Tab>
+  <Tab title="Notification Context">
+    **Sorumluluk Alani:** Kullaniciya bildirim gonderimini yonetir.
+
+    **Aggregate Root:** `Notification`
+    - Bildirim icerigi ve hedef kitlesi
+    - Gonderim durumu ve gecmisi
+    - Sablon yonetimi
+
+    **Dinledigi Events:**
+    - `order.created` - Siparis onay bildirimi gonderir
+    - `order.updated` - Siparis durum güncelleme bildirimi gonderir
+
+    **Veritabani:** MongoDB (esnek sema, farkli bildirim tipleri)
+  </Tab>
+  <Tab title="Inventory Context">
+    **Sorumluluk Alani:** Ürün stok miktarlarini yonetir.
+
+    **Aggregate Root:** `StockItem`
+    - Ürün basi stok miktari
+    - Rezervasyon bilgileri
+    - Stok hareketleri (giris/cikis)
+
+    **Dinledigi Events:**
+    - `order.created` - Stok düsürme islemi
+    - `order.updated` - Stok güncelleme veya iade
+
+    **Veritabani:** Redis (yüksek performansli atomik islemler)
+  </Tab>
+  <Tab title="Search Context">
+    **Sorumluluk Alani:** Ürün arama ve filtreleme islemlerini saglar.
+
+    **Aggregate Root:** `SearchDocument`
+    - Arama indeksi dokümanlari
+    - Filtreleme kriterleri
+    - Siralama parametreleri
+
+    **Dinledigi Events:**
+    - `order.created` - Siparis verisini indeksler
+    - `order.updated` - Indeks güncellemesi yapar
+
+    **Veritabani:** Elasticsearch (tam metin arama, ters indeks)
+  </Tab>
+</Tabs>
+
+---
+
+## Aggregate Root: Order Entity
+
+Order, bu projedeki ana Aggregate Root'tur. Tüm siparis islemleri bu entity üzerinden
+gerceklestirilir ve disaridaki bilesenler Order icindeki alt entity'lere dogrudan erisiemez.
+
+<CodeGroup>
+```typescript Order Aggregate Root
+interface Order {
+  id: string;                // Benzersiz siparis kimlik numarasi
+  customerId: string;        // Müsteri kimlik numarasi
+  items: OrderItem[];        // Siparis kalemleri (alt entity)
+  status: OrderStatus;       // Siparis durumu (value object)
+  totalAmount: number;       // Toplam tutar
+  createdAt: string;         // Olusturulma tarihi
+  updatedAt: string;         // Güncellenme tarihi
+}
+
+// Alt Entity
+interface OrderItem {
+  productId: string;
+  quantity: number;
+  price: number;
+}
+
+// Value Object
+type OrderStatus =
+  | "created"
+  | "processing"
+  | "completed"
+  | "cancelled";
+```
+</CodeGroup>
+
+<Tip>
+  Aggregate Root kurallari:
+  - Dis dünya yalnizca Aggregate Root üzerinden islem yapar
+  - Bir transaction (islem) sadece tek bir Aggregate'i degistirir
+  - Aggregate Root, kendi tutarliligini (invariant) korur
+</Tip>
+
+---
+
+## Domain Events (Alan Olaylari)
+
+Domain Event'ler, is alaninda gerceklesen anlamli degisiklikleri temsil eder. Bu projede
+domain event'ler RabbitMQ üzerinden diger bounded context'lere iletilir.
+
+### Olay Yapisi
+
+<CodeGroup>
+```typescript BaseEvent - Tüm Olaylarin Temeli
+export interface BaseEvent<T = unknown> {
+  id: string;        // UUID - her olayin benzersiz kimlik numarasi
+  type: string;      // Olay tipi (orn: "order.created")
+  timestamp: string; // ISO 8601 zaman damgasi
+  data: T;           // Olay verisi (generic)
+}
+```
+
+```typescript OrderCreatedEvent
+export interface OrderCreatedEvent extends BaseEvent<Order> {
+  type: "order.created";
+}
+// Yeni bir siparis olusturuldugunda publish edilir
+// data alani tam Order nesnesini icerir
+```
+
+```typescript OrderUpdatedEvent
+export interface OrderUpdatedEvent extends BaseEvent<Order> {
+  type: "order.updated";
+}
+// Siparis guncellediginde publish edilir
+// data alani güncellenms Order nesnesini icerir
+```
+</CodeGroup>
+
+### Olay Akis Diyagrami
+
+```mermaid
+sequenceDiagram
+    participant Client as Istemci
+    participant OS as Order Service
+    participant RMQ as RabbitMQ
+    participant NS as Notification Service
+    participant IS as Inventory Service
+    participant SS as Search Service
+
+    Client->>OS: POST /api/orders
+    OS->>OS: Order Aggregate olustur
+    OS->>OS: Veritabanina kaydet
+    OS->>RMQ: OrderCreatedEvent yayinla
+
+    par Paralel Tuketim
+        RMQ->>NS: order.created
+        NS->>NS: Bildirim olustur
+    and
+        RMQ->>IS: order.created
+        IS->>IS: Stok güncelle
+    and
+        RMQ->>SS: order.created
+        SS->>SS: Indeks güncelle
+    end
+```
+
+---
+
+## Ubiquitous Language (Ortak Dil)
+
+Projede kullanilan ortak terminoloji asagidaki gibidir. Bu terimler kod, dokümantasyon ve
+ekip ici iletisimde tutarli bir sekilde kullanilmalidir.
+
+| Terim | Aciklama | Baglam |
+|-------|----------|--------|
+| **Order (Siparis)** | Müsterinin verdigi ürün siparisi | Order Context |
+| **Checkout (Odeme)** | Siparisin tamamlanma süreci (Saga) | Order Context |
+| **Stock (Stok)** | Bir ürünün mevcut miktari | Inventory Context |
+| **Reservation (Rezervasyon)** | Odeme süresince tutulan stok | Inventory Context |
+| **Notification (Bildirim)** | Kullaniciya gonderilen mesaj | Notification Context |
+| **Index (Indeks)** | Aranabilir veri kopyasi | Search Context |
+| **Event (Olay)** | Is alaninda gerceklesen degisiklik | Tüm Context'ler |
+| **Saga** | Birden fazla servisi kapsayan is süreci | Order Context |
+| **DLQ (Olü Mektup Kuyrugu)** | Islenemeyen mesajlarin toplandi kuyruk | Altyapi |
+
+---
+
+## Anti-Corruption Layer (Bozulmayi Onleme Katmani)
+
+Anti-Corruption Layer (ACL), farkli bounded context'lerin birbirinin iç modelini
+kirletmesini onleyen bir ara katmandir. Bu projede **API Gateway** bu gorevi üstlenir.
+
+```mermaid
+graph LR
+    subgraph "Dis Dünya"
+        C[Istemci]
+    end
+
+    subgraph "Anti-Corruption Layer"
+        GW[API Gateway<br/>:3000]
+        AUTH[Auth Middleware]
+        RL[Rate Limiter]
+        CB[Circuit Breaker]
+        GW --- AUTH
+        GW --- RL
+        GW --- CB
+    end
+
+    subgraph "Ic Domain"
+        OS[Order Service]
+        NS[Notification Service]
+        IS[Inventory Service]
+        SS[Search Service]
+    end
+
+    C --> GW
+    GW --> OS
+    GW --> NS
+    GW --> IS
+    GW --> SS
+
+    style GW fill:#6c5ce7,color:#fff
+```
+
+<Warning>
+  Ic servisler dogrudan dis dünyaya acik degildir. Tüm istekler API Gateway üzerinden
+  gecmek zorundadir. Bu sayede:
+  - Kimlik dogrulama tek noktada yapilir
+  - Hiz sinirlandirma merkezi olarak uygulanir
+  - Dis API degisikliklerinden ic servisler etkilenmez
+</Warning>
+
+### ACL'nin Sagladigi Korumalar
+
+<CardGroup cols={3}>
+  <Card title="Kimlik Dogrulama" icon="lock">
+    Better Auth ile email/sifre, GitHub ve Google OAuth destegi. Dogrulanmamis
+    istekler ic servislere ulasamaz.
+  </Card>
+  <Card title="Hiz Sinirlandirma" icon="gauge-high">
+    Dakikada 200 istek limiti. Kotu niyetli veya asiri istekler engellenir ve
+    ic servisler korunur.
+  </Card>
+  <Card title="Devre Kesici" icon="toggle-off">
+    Bir ic servis cokerse diger servislerin kaskat cökmesi (cascading failure)
+    onlenir. 5 hata sonrasi devre 30 saniye acilir.
+  </Card>
+</CardGroup>
+
+---
+
+## Context Mapping (Baglam Haritalama)
+
+Bounded Context'ler arasindaki iliskilerin genel haritasi:
+
+```mermaid
+graph TB
+    OC["Order Context\n(Upstream)"]
+    NC["Notification Context\n(Downstream)"]
+    IC["Inventory Context\n(Downstream)"]
+    SC["Search Context\n(Downstream)"]
+    GW["API Gateway\n(Anti-Corruption Layer)"]
+
+    OC -->|"Yayinla (Publish)"| NC
+    OC -->|"Yayinla (Publish)"| IC
+    OC -->|"Yayinla (Publish)"| SC
+
+    GW -->|"Istek Yonlendirme"| OC
+    GW -->|"Istek Yonlendirme"| IC
+    GW -->|"Istek Yonlendirme"| SC
+
+    style OC fill:#00b894,color:#fff
+    style NC fill:#fdcb6e,color:#000
+    style IC fill:#e17055,color:#fff
+    style SC fill:#0984e3,color:#fff
+    style GW fill:#6c5ce7,color:#fff
+```
+
+| Iliski Tipi | Upstream | Downstream | Aciklama |
+|-------------|----------|------------|----------|
+| **Publisher-Subscriber** | Order | Notification | Siparis olaylarini dinler, bildirim gonderir |
+| **Publisher-Subscriber** | Order | Inventory | Siparis olaylarini dinler, stok günceller |
+| **Publisher-Subscriber** | Order | Search | Siparis olaylarini dinler, indeks günceller |
+| **Anti-Corruption** | API Gateway | Tüm Servisler | Dis istekleri filtreler ve yonlendirir |
+
+<Note>
+  Order Context bir **upstream** (yukarı akıs) context olarak olay yayinlar. Diger context'ler
+  **downstream** (asagi akis) olarak bu olaylara abone olur. Bu iliski modeli
+  **Publisher-Subscriber** olarak tanimlanir.
+</Note>

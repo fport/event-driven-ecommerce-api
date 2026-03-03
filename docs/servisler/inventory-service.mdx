@@ -1,0 +1,353 @@
+---
+title: "Inventory Service"
+description: "Redis tabanli urun ve stok yonetimi servisi. CRUD islemleri, stok ayarlama, saga entegrasyonu ve Zod dogrulama destegi."
+---
+
+# Inventory Service
+
+Inventory Service, urun katalogu ve stok yonetiminden sorumlu servistir. Veriler Redis'te saklanir ve saga pattern ile entegre calisarak stok rezervasyonu islemlerini destekler.
+
+**Port:** 3003
+**Veritabani:** Redis
+**Framework:** Hono.dev
+
+## Mimari Genel Bakis
+
+```mermaid
+graph TB
+    GW[API Gateway]
+    OS[Order Service]
+    RMQ[RabbitMQ]
+
+    GW -->|CRUD istekleri| IS[Inventory Service]
+    OS -->|Saga: stok kontrol / rezerve| IS
+    RMQ -->|order.created| IS
+
+    IS --> REDIS[(Redis)]
+```
+
+## Redis Veri Modeli
+
+Her urun Redis'te JSON string olarak saklanir. Anahtar formati `product:{id}` seklindedir.
+
+```typescript
+// services/inventory-service/src/db.ts
+export interface Product {
+  id: string;
+  name: string;
+  stock: number;
+  price: number;
+}
+```
+
+Ornek Redis kaydi:
+
+```
+KEY:   product:p1
+VALUE: {"id":"p1","name":"Laptop","stock":50,"price":15000}
+```
+
+### Redis Erisim Katmani
+
+```typescript
+// services/inventory-service/src/db.ts
+import Redis from "ioredis";
+
+const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
+const PRODUCT_PREFIX = "product:";
+
+export const inventoryDb = {
+  async getProduct(id: string): Promise<Product | null> {
+    const data = await redis.get(`${PRODUCT_PREFIX}${id}`);
+    return data ? JSON.parse(data) : null;
+  },
+
+  async setProduct(product: Product): Promise<void> {
+    await redis.set(`${PRODUCT_PREFIX}${product.id}`, JSON.stringify(product));
+  },
+
+  async getAllProducts(): Promise<Product[]> {
+    const keys = await redis.keys(`${PRODUCT_PREFIX}*`);
+    if (keys.length === 0) return [];
+    const values = await redis.mget(keys);
+    return values.filter(Boolean).map((v) => JSON.parse(v as string));
+  },
+
+  async decreaseStock(
+    productId: string, quantity: number
+  ): Promise<{ success: boolean; stock?: number }> {
+    const product = await this.getProduct(productId);
+    if (!product) return { success: false };
+    if (product.stock < quantity) return { success: false, stock: product.stock };
+
+    product.stock -= quantity;
+    await this.setProduct(product);
+    return { success: true, stock: product.stock };
+  },
+
+  async deleteProduct(id: string): Promise<boolean> {
+    const result = await redis.del(`${PRODUCT_PREFIX}${id}`);
+    return result > 0;
+  },
+};
+```
+
+<Note>
+  `getAllProducts` metodu `redis.keys()` komutunu kullanir. Bu, uretim ortaminda buyuk veri setlerinde performans sorunu yaratabilir. Bu durumda `SCAN` komutu tercih edilebilir.
+</Note>
+
+## API Endpoint'leri
+
+### Tum Urunleri Listeleme
+
+<CodeGroup>
+```bash Istek
+curl http://localhost:3003/products
+```
+
+```json Yanit
+{
+  "success": true,
+  "data": [
+    { "id": "p1", "name": "Laptop", "stock": 50, "price": 15000 },
+    { "id": "p2", "name": "Mouse", "stock": 200, "price": 250 }
+  ]
+}
+```
+</CodeGroup>
+
+### Urun Detayi Getirme
+
+<CodeGroup>
+```bash Istek
+curl http://localhost:3003/products/p1
+```
+
+```json Yanit (200)
+{
+  "success": true,
+  "data": { "id": "p1", "name": "Laptop", "stock": 50, "price": 15000 }
+}
+```
+
+```json Yanit (404)
+{
+  "success": false,
+  "error": "Product not found"
+}
+```
+</CodeGroup>
+
+### Urun Olusturma / Guncelleme
+
+<CodeGroup>
+```bash Istek
+curl -X POST http://localhost:3003/products \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "p1",
+    "name": "Laptop",
+    "stock": 50,
+    "price": 15000
+  }'
+```
+
+```json Yanit (201)
+{
+  "success": true,
+  "data": { "id": "p1", "name": "Laptop", "stock": 50, "price": 15000 }
+}
+```
+</CodeGroup>
+
+<Tip>
+  `POST /products` endpoint'i hem yeni urun olusturma hem de mevcut urunu guncelleme icin kullanilir. Ayni `id` ile gonderilen istek, mevcut urunu uzerine yazar.
+</Tip>
+
+### Stok Ayarlama
+
+<CodeGroup>
+```bash Stok Artirma
+curl -X PATCH http://localhost:3003/products/p1 \
+  -H "Content-Type: application/json" \
+  -d '{ "stockChange": 10 }'
+```
+
+```bash Stok Azaltma
+curl -X PATCH http://localhost:3003/products/p1 \
+  -H "Content-Type: application/json" \
+  -d '{ "stockChange": -5 }'
+```
+
+```json Basarili Yanit (200)
+{
+  "success": true,
+  "data": { "id": "p1", "name": "Laptop", "stock": 45, "price": 15000 }
+}
+```
+
+```json Yetersiz Stok Yaniti (400)
+{
+  "success": false,
+  "error": "Insufficient stock"
+}
+```
+</CodeGroup>
+
+`stockChange` parametresi:
+- **Pozitif deger:** Stok artirir (orn: `+10`)
+- **Negatif deger:** Stok azaltir (orn: `-5`)
+- Sonuc stok **negatife dusemez**, bu durumda `400` hatasi doner
+
+### Urun Silme
+
+<CodeGroup>
+```bash Istek
+curl -X DELETE http://localhost:3003/products/p1
+```
+
+```json Yanit (200)
+{
+  "success": true
+}
+```
+
+```json Yanit (404)
+{
+  "success": false,
+  "error": "Product not found"
+}
+```
+</CodeGroup>
+
+## Zod Dogrulama
+
+Urun olusturma/guncelleme istekleri Zod ile dogrulanir:
+
+```typescript
+// services/inventory-service/src/routes.ts
+const productSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  stock: z.number().int().nonnegative(),
+  price: z.number().positive(),
+});
+```
+
+| Alan    | Tip      | Kural                                |
+|---------|----------|--------------------------------------|
+| `id`    | string   | En az 1 karakter                     |
+| `name`  | string   | En az 1 karakter                     |
+| `stock` | number   | Tam sayi, negatif olamaz (>= 0)      |
+| `price` | number   | Pozitif sayi (> 0)                   |
+
+## Saga Entegrasyonu
+
+Order Service'in checkout saga'si sirasinda, Inventory Service HTTP API'si uzerinden stok islemleri gerceklestirilir:
+
+```mermaid
+sequenceDiagram
+    participant OS as Order Service (Saga)
+    participant IS as Inventory Service
+
+    Note over OS: Adim 1 - Stok Kontrolu
+    OS->>IS: GET /products/{id}
+    IS-->>OS: { stock: 50 }
+    Note over OS: stock >= quantity? Devam et
+
+    Note over OS: Adim 2 - Stok Rezervasyonu
+    OS->>IS: PATCH /products/{id}<br/>{ stockChange: -2 }
+    IS-->>OS: { stock: 48 }
+
+    Note over OS: Odeme basarisiz olursa...
+
+    Note over OS: Telafi - Stok Geri Birakma
+    OS->>IS: GET /products/{id}
+    IS-->>OS: { stock: 48 }
+    OS->>IS: POST /products<br/>{ ...product, stock: 50 }
+    IS-->>OS: OK
+```
+
+### Saga'dan Cagrilan Fonksiyonlar
+
+```typescript
+// services/order-service/src/saga/order-saga.ts
+
+// Stok kontrol
+async function checkStock(productId: string, quantity: number) {
+  const res = await fetch(`${INVENTORY_URL}/products/${productId}`);
+  const { data } = await res.json();
+  return { available: data.stock >= quantity, product: data };
+}
+
+// Stok rezerve (azalt)
+async function reserveStock(productId: string, quantity: number) {
+  const res = await fetch(`${INVENTORY_URL}/products/${productId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ stockChange: -quantity }),
+  });
+  return res.ok;
+}
+
+// Stok geri birak (telafi)
+async function releaseStock(productId: string, quantity: number) {
+  const product = await fetch(`${INVENTORY_URL}/products/${productId}`);
+  const { data } = await product.json();
+  await fetch(`${INVENTORY_URL}/products`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...data, stock: data.stock + quantity }),
+  });
+}
+```
+
+## RabbitMQ Consumer
+
+Inventory Service ayrica RabbitMQ uzerinden `order.created` olaylarini dinleyerek stok dusme islemi yapar:
+
+```typescript
+// services/inventory-service/src/consumer.ts
+// Sadece order.created olaylarini dinler
+await channel.bindQueue(
+  QUEUES.INVENTORY_ORDERS,
+  EXCHANGES.ORDERS,
+  ROUTING_KEYS.ORDER_CREATED
+);
+
+channel.consume(QUEUES.INVENTORY_ORDERS, async (msg) => {
+  const event: OrderCreatedEvent = JSON.parse(msg.content.toString());
+
+  for (const item of event.data.items) {
+    const result = await inventoryDb.decreaseStock(
+      item.productId, item.quantity
+    );
+    if (result.success) {
+      console.log(`Stock decreased for ${item.productId}: remaining ${result.stock}`);
+    }
+  }
+
+  channel.ack(msg);
+});
+```
+
+| Parametre       | Deger                     |
+|-----------------|---------------------------|
+| Kuyruk          | `inventory.orders`        |
+| Routing key     | `order.created`           |
+| DLX             | `orders.exchange.dlx`     |
+| Maksimum deneme | 3                         |
+| Prefetch        | 10                        |
+
+<Warning>
+  Inventory consumer **yalnizca** `order.created` olaylarini dinler. `order.updated` olaylarina abone degildir. Bu, saga tabanli checkout ile olusturulan siparislerde cift stok dusme riskini azaltir.
+</Warning>
+
+## Ortam Degiskenleri
+
+| Degisken           | Varsayilan                          | Aciklama                  |
+|--------------------|-------------------------------------|---------------------------|
+| `REDIS_URL`        | `redis://localhost:6379`            | Redis baglanti adresi     |
+| `RABBITMQ_URL`     | `amqp://guest:guest@localhost:5672` | RabbitMQ baglanti adresi  |
+| `APM_SERVICE_NAME` | `unknown`                           | APM servis adi            |
+| `APM_SERVER_URL`   | -                                   | APM sunucu adresi         |

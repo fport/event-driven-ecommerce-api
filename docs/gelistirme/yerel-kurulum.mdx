@@ -1,0 +1,245 @@
+---
+title: "Yerel Kurulum"
+description: "Event-driven e-ticaret projesini yerel ortamda kurmak ve calistirmak icin adim adim rehber"
+---
+
+# Yerel Kurulum Rehberi
+
+Bu rehber, event-driven e-ticaret mikro servis projesini yerel gelistirme ortaminizda kurup calistirmaniz icin gereken tum adimlari icerir.
+
+## On Kosullar
+
+Projeyi calistirmak icin asagidaki araclarin sisteminizde kurulu olmasi gerekmektedir.
+
+<CardGroup cols={3}>
+  <Card title="Docker Desktop" icon="docker">
+    Docker ve Docker Compose dahil. Minimum 8 GB RAM tahsisi onerilir.
+    [Indir](https://docs.docker.com/get-docker/)
+  </Card>
+  <Card title="Bun" icon="bolt">
+    JavaScript/TypeScript runtime (calisma zamani ortami). v1.0 ve uzeri gereklidir.
+    [Indir](https://bun.sh)
+  </Card>
+  <Card title="Git" icon="code-branch">
+    Versiyon kontrol sistemi. Herhangi bir guncel surum yeterlidir.
+    [Indir](https://git-scm.com)
+  </Card>
+</CardGroup>
+
+<Note>
+  Docker Desktop'ta en az **8 GB RAM** tahsis etmeniz onerilir. Elasticsearch, PostgreSQL (primary + replica), RabbitMQ, MongoDB, Redis, Kibana, APM Server, Prometheus ve Grafana ayni anda calisacaktir.
+</Note>
+
+## Kurulum Adimlari
+
+<Steps>
+  <Step title="Depoyu Klonlayin">
+    Projeyi GitHub'dan yerel makinenize indirin.
+
+    ```bash
+    git clone https://github.com/<kullanici-adi>/event-driven-project.git
+    cd event-driven-project
+    ```
+  </Step>
+
+  <Step title="Bagimliliklari Yukleyin">
+    Bun workspaces (calisma alanlari) ile tum servis ve paket bagimliliklar otomatik olarak yuklenir.
+
+    ```bash
+    bun install
+    ```
+
+    Bu komut asagidaki workspace'leri (calisma alanlarini) yukler:
+    - `packages/shared` -- Ortak tipler, logger, metrics, APM
+    - `services/api-gateway` -- API agidi servisi
+    - `services/order-service` -- Siparis servisi
+    - `services/notification-service` -- Bildirim servisi
+    - `services/inventory-service` -- Envanter servisi
+    - `services/search-service` -- Arama servisi
+  </Step>
+
+  <Step title="Altyapi Servislerini Baslatin">
+    Docker Compose ile tum altyapi bilesenlerini ayaga kaldirin.
+
+    ```bash
+    docker compose up -d
+    ```
+
+    Bu komut asagidaki servisleri baslatir:
+
+    | Servis | Port | Aciklama |
+    |--------|------|----------|
+    | PostgreSQL (primary) | 5432 | Ana veritabani (yazma islemleri) |
+    | PostgreSQL (replica) | 5433 | Kopya veritabani (okuma islemleri) |
+    | Redis | 6379 | Onbellek (cache) ve oturum yonetimi |
+    | RabbitMQ | 5672 / 15672 | Mesaj kuyrugu / Yonetim arayuzu |
+    | MongoDB | 27017 | Bildirim veritabani |
+    | Elasticsearch | 9200 | Arama motoru |
+    | Kibana | 5601 | Elasticsearch gorsel arayuzu |
+    | APM Server | 8200 | Uygulama performans izleme |
+    | Prometheus | 9090 | Metrik toplama |
+    | Grafana | 3100 | Izleme panolari (dashboards) |
+  </Step>
+
+  <Step title="Servislerin Hazir Olmasini Bekleyin">
+    Ozellikle Elasticsearch ve RabbitMQ'nun baslamasi 30-60 saniye surebilir. Servislerin hazir olup olmadigini kontrol edin.
+
+    ```bash
+    # Tum container durumlarini kontrol edin
+    docker compose ps
+
+    # Elasticsearch saglik kontrolu
+    curl -s http://localhost:9200/_cluster/health | jq .status
+
+    # RabbitMQ saglik kontrolu
+    curl -s http://localhost:15672/api/overview \
+      -u guest:guest | jq .cluster_name
+    ```
+  </Step>
+
+  <Step title="Uygulama Servislerini Baslatin">
+    Her servisi ayri terminal pencerelerinde gelistirme modunda baslatin.
+
+    <CodeGroup>
+    ```bash API Gateway
+    cd services/api-gateway && bun run dev
+    ```
+
+    ```bash Order Service
+    cd services/order-service && bun run dev
+    ```
+
+    ```bash Notification Service
+    cd services/notification-service && bun run dev
+    ```
+
+    ```bash Inventory Service
+    cd services/inventory-service && bun run dev
+    ```
+
+    ```bash Search Service
+    cd services/search-service && bun run dev
+    ```
+    </CodeGroup>
+
+    <Tip>
+      Her serviste `--watch` bayragi aktiftir. Kod degisikliklerinde servis otomatik olarak yeniden baslar.
+    </Tip>
+  </Step>
+
+  <Step title="Saglik Kontrollerini Dogrulayin">
+    Tum servislerin duzgun calistigini dogrulamak icin health check (saglik kontrolu) endpoint'lerini test edin.
+
+    ```bash
+    # Tum servisleri tek seferde kontrol edin
+    for port in 3000 3001 3002 3003 3004; do
+      echo "Port $port: $(curl -s http://localhost:$port/health | jq -r .status)"
+    done
+    ```
+
+    Beklenen cikti:
+    ```
+    Port 3000: ok
+    Port 3001: ok
+    Port 3002: ok
+    Port 3003: ok
+    Port 3004: ok
+    ```
+  </Step>
+</Steps>
+
+## Alternatif: Tek Komutla Tum Servisleri Baslatin
+
+Docker Compose ile tum uygulama servislerini de container olarak baslatabilirsiniz:
+
+```bash
+docker compose up -d --build
+```
+
+Bu yontem ile servisler production modunda calisir ve kod degisikliklerinde otomatik yenileme yapilmaz.
+
+## Yararli Arayuzler
+
+Kurulum tamamlandiktan sonra asagidaki arayuzlere erisebilirsiniz:
+
+<CardGroup cols={2}>
+  <Card title="RabbitMQ Yonetim Paneli" icon="message" href="http://localhost:15672">
+    Kullanici: `guest` / Sifre: `guest`
+  </Card>
+  <Card title="Kibana" icon="chart-bar" href="http://localhost:5601">
+    Elasticsearch veri gorsellestirme
+  </Card>
+  <Card title="Prometheus" icon="database" href="http://localhost:9090">
+    Metrik sorgulama arayuzu
+  </Card>
+  <Card title="Grafana" icon="chart-line" href="http://localhost:3100">
+    Kullanici: `admin` / Sifre: `admin`
+  </Card>
+</CardGroup>
+
+## Sik Karsilasilan Sorunlar
+
+<AccordionGroup>
+  <Accordion title="Port cakismasi hatasi (EADDRINUSE)">
+    Baska bir uygulama ayni portu kullaniyor olabilir. Hangi islemin portu kullandigini bulun:
+
+    ```bash
+    # macOS / Linux
+    lsof -i :5432
+    # veya
+    netstat -tlnp | grep 5432
+    ```
+
+    Cakisan uygulamayi durdurun veya `docker-compose.yml` dosyasinda port eslesmesini degistirin.
+  </Accordion>
+
+  <Accordion title="Elasticsearch baslamiyor veya 'vm.max_map_count' hatasi">
+    Elasticsearch icin gerekli cekirdek parametresini ayarlayin:
+
+    ```bash
+    # Linux
+    sudo sysctl -w vm.max_map_count=262144
+
+    # macOS (Docker Desktop icinde ayarlanir, genellikle gerekmez)
+    ```
+  </Accordion>
+
+  <Accordion title="PostgreSQL replica baglanti hatasi">
+    Replica (kopya) sunucunun baslamasi primary'den (ana sunucu) sonra zaman alabilir. Durumu kontrol edin:
+
+    ```bash
+    docker compose logs postgres-replica --tail=20
+    ```
+
+    Replikayi yeniden baslatmak icin:
+    ```bash
+    docker compose restart postgres-replica
+    ```
+  </Accordion>
+
+  <Accordion title="RabbitMQ baglanti hatasi (ECONNREFUSED)">
+    RabbitMQ'nun tamamen baslamasi 15-30 saniye surebilir. Durumu kontrol edin:
+
+    ```bash
+    docker compose logs rabbitmq --tail=10
+    ```
+
+    Health check (saglik kontrolu) gecene kadar bekleyin:
+    ```bash
+    docker compose exec rabbitmq rabbitmq-diagnostics -q ping
+    ```
+  </Accordion>
+
+  <Accordion title="Tum verileri sifirlamak istiyorum">
+    Docker volume'larini (kalici depolama alanlari) silerek tum verileri temizleyebilirsiniz:
+
+    ```bash
+    docker compose down -v
+    docker compose up -d
+    ```
+
+    <Warning>
+      Bu komut tum veritabani verilerini, Elasticsearch indekslerini ve RabbitMQ kuyruklarini kalici olarak siler.
+    </Warning>
+  </Accordion>
+</AccordionGroup>

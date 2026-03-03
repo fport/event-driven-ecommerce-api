@@ -1,0 +1,97 @@
+---
+title: "Hizli Baslangic"
+description: "Projeyi 5 dakikada ayaga kaldirin"
+---
+
+# Hizli Baslangic
+
+Bu rehber, projeyi yerel ortamda calistirmak icin gerekli adimlari icermektedir.
+
+## Onkosuller
+
+<CardGroup cols={2}>
+  <Card title="Docker Desktop" icon="docker">
+    Docker ve Docker Compose yuklu olmali
+  </Card>
+  <Card title="Bun" icon="bolt">
+    Bun runtime (v1.0+) yuklu olmali
+  </Card>
+</CardGroup>
+
+## Kurulum Adimlari
+
+<Steps>
+  <Step title="Repoyu klonlayin">
+    ```bash
+    git clone <repo-url>
+    cd event-driven-project
+    ```
+  </Step>
+  <Step title="Bagimliliklari yukleyin">
+    ```bash
+    bun install
+    ```
+    Bu komut monorepo yapisindaki tum workspace'lerin bagimliligini yukler.
+  </Step>
+  <Step title="Altyapi servislerini baslatin">
+    ```bash
+    docker compose up -d
+    ```
+    Bu komut 14 container baslatir: 5 uygulama servisi + PostgreSQL (primary + replica), Redis, MongoDB, RabbitMQ, Elasticsearch, Kibana, APM Server, Prometheus ve Grafana.
+  </Step>
+  <Step title="Servislerin hazir olmasini bekleyin">
+    ```bash
+    docker compose ps
+    ```
+    Tum servislerin `healthy` durumunda oldugundan emin olun. Elasticsearch ve RabbitMQ ilk baslatmada 30-60 saniye surebilir.
+  </Step>
+  <Step title="Sistemi dogrulayin">
+    ```bash
+    # Health check
+    curl http://localhost:3000/health
+
+    # E2E testlerini calistirin
+    bun run tests/e2e.ts
+    ```
+  </Step>
+</Steps>
+
+## Erisim Noktalari
+
+Kurulumdan sonra asagidaki adreslere erisebilirsiniz:
+
+| Servis | URL | Aciklama |
+|--------|-----|----------|
+| API Gateway | http://localhost:3000 | Ana erisim noktasi |
+| RabbitMQ UI | http://localhost:15672 | Kuyruk yonetimi (guest/guest) |
+| Kibana | http://localhost:5601 | Log arama ve goruntuleme |
+| Prometheus | http://localhost:9090 | Metrik sorgulama |
+| Grafana | http://localhost:3100 | Pano goruntuleme (admin/admin) |
+| Elasticsearch | http://localhost:9200 | Arama motoru API'si |
+
+## Ilk API Cagrisi
+
+<CodeGroup>
+```bash Kayit Ol
+curl -X POST http://localhost:3000/api/auth/sign-up/email \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Test User",
+    "email": "test@example.com",
+    "password": "password123"
+  }'
+```
+
+```bash Giris Yap
+curl -X POST http://localhost:3000/api/auth/sign-in/email \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@example.com",
+    "password": "password123"
+  }'
+```
+</CodeGroup>
+
+<Tip>
+  Giris yaptiktan sonra alinan session token'i, korunakli endpoint'lere erisim icin `Cookie` header'inda kullanin.
+</Tip>

@@ -1,0 +1,121 @@
+---
+title: "Teknoloji Yigini"
+description: "Projede kullanilan teknolojiler ve tercih nedenleri"
+---
+
+# Teknoloji Yigini (Tech Stack)
+
+Bu proje, performans, gelistirici deneyimi ve uretim hazirligini on planda tutan modern teknolojilerle insa edilmistir.
+
+## Runtime & Framework
+
+<CardGroup cols={2}>
+  <Card title="Bun" icon="bolt">
+    **Runtime & Paket Yoneticisi**
+
+    Node.js'e alternatif, Zig ile yazilmis yuksek performansli JavaScript/TypeScript runtime. Yerlesik test runner, bundler ve paket yoneticisi ile gelistirme surecini hizlandirir.
+  </Card>
+  <Card title="Hono" icon="fire">
+    **Web Framework**
+
+    Ultrafast, lightweight ve edge-ready web framework. Express benzeri API ile kolay kullanim saglarken, Bun uzerinde mukemmel performans sunar.
+  </Card>
+</CardGroup>
+
+## Veritabanlari & Depolama
+
+<CardGroup cols={3}>
+  <Card title="PostgreSQL" icon="database">
+    **Iliskisel Veritabani**
+
+    Siparis verileri icin primary/replica yapilandirmasi. Streaming replication ile yuksek erisilebilirlik.
+  </Card>
+  <Card title="MongoDB" icon="leaf">
+    **Dokuman Veritabani**
+
+    Bildirim kayitlari icin esnek sema yapisi. Yuksek yazma performansi ile event log depolama.
+  </Card>
+  <Card title="Redis" icon="bolt">
+    **Onbellek & Veri Yapilari**
+
+    Write-through cache, rate limiting sayaclari ve envanter verileri icin in-memory veri deposu.
+  </Card>
+</CardGroup>
+
+## Mesajlasma & Arama
+
+<CardGroup cols={2}>
+  <Card title="RabbitMQ" icon="envelope">
+    **Mesaj Brokeri**
+
+    Topic exchange ile event yonlendirme, Dead Letter Queue ile hata yonetimi. Durable queue'lar ile mesaj kaybini onleme.
+  </Card>
+  <Card title="Elasticsearch" icon="magnifying-glass">
+    **Arama Motoru**
+
+    Siparis verileri uzerinde full-text arama, fuzzy matching ve aggregation destegi. Kibana ile goruntuleme.
+  </Card>
+</CardGroup>
+
+## ORM & Kimlik Dogrulama
+
+<CardGroup cols={2}>
+  <Card title="Drizzle ORM" icon="code">
+    **TypeScript ORM**
+
+    Type-safe SQL sorgu olusturucu. PostgreSQL icin schema tanimi, migration ve dual connection (read/write split) destegi.
+  </Card>
+  <Card title="Better Auth" icon="shield-halved">
+    **Kimlik Dogrulama**
+
+    Email/parola, GitHub OAuth ve Google OAuth destegi. Session bazli oturum yonetimi (7 gun sureli).
+  </Card>
+</CardGroup>
+
+## Izleme & Gozlemlenebilirlik
+
+<CardGroup cols={3}>
+  <Card title="Prometheus" icon="chart-bar">
+    **Metrik Toplama**
+
+    HTTP istek sayilari, hata oranlari, yanit sureleri ve uptime metrikleri.
+  </Card>
+  <Card title="Grafana" icon="chart-line">
+    **Gorsellestirme**
+
+    Otomatik provizyon edilmis panolar ile gercek zamanli servis izleme.
+  </Card>
+  <Card title="Elastic APM" icon="wave-pulse">
+    **Uygulama Izleme**
+
+    Dagitik izleme (distributed tracing), trace context propagation ve performans analizi.
+  </Card>
+</CardGroup>
+
+## Altyapi & DevOps
+
+<CardGroup cols={3}>
+  <Card title="Docker" icon="docker">
+    **Konteynerizasyon**
+
+    Multi-stage build ile optimize edilmis image'lar. Health check ve restart politikalari.
+  </Card>
+  <Card title="Kubernetes" icon="dharmachakra">
+    **Orkestrasyon**
+
+    Helm chart ile deploy, HPA ile otomatik olcekleme, Ingress ile trafik yonetimi.
+  </Card>
+  <Card title="Terraform" icon="layer-group">
+    **IaC**
+
+    Docker provider ile modular altyapi tanimlama. Network ve servis moduleri.
+  </Card>
+</CardGroup>
+
+## CI/CD
+
+| Arac | Kullanim |
+|------|----------|
+| **GitHub Actions** | 3 asama pipeline: Lint/Build → Docker Build/Push → K8s Deploy |
+| **GHCR** | Docker image registry (GitHub Container Registry) |
+| **Helm** | Kubernetes deployment yonetimi |

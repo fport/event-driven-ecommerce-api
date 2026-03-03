@@ -1,0 +1,177 @@
+---
+title: "API Genel Bakis"
+description: "Event-Driven E-Commerce API'sine giris, kimlik dogrulama, yanit formati ve hata kodlari"
+---
+
+# API Genel Bakis
+
+Bu dokuman, Event-Driven E-Commerce platformunun RESTful API'sini tanimlar. Tum istekler API Gateway (API Gecidi) uzerinden yonlendirilir ve merkezi kimlik dogrulama ile hiz sinirlamasi uygulanir.
+
+## Base URL (Temel Adres)
+
+```
+http://localhost:3000
+```
+
+API Gateway, tum mikroservislere tek bir giris noktasi saglar. Istemciler dogrudan arka plan servislerine degil, yalnizca gateway uzerinden erisim saglar.
+
+<CardGroup cols={2}>
+  <Card title="Kimlik Dogrulama" icon="lock" href="/api-referansi/kimlik-dogrulama">
+    Better Auth ile email/sifre ve sosyal giris
+  </Card>
+  <Card title="Siparisler" icon="cart-shopping" href="/api-referansi/siparisler">
+    Siparis olusturma, listeleme, guncelleme ve saga checkout
+  </Card>
+  <Card title="Urunler" icon="box" href="/api-referansi/urunler">
+    Urun yonetimi ve stok ayarlama
+  </Card>
+  <Card title="Bildirimler" icon="bell" href="/api-referansi/bildirimler">
+    Siparis bildirimleri sorgulama
+  </Card>
+  <Card title="Arama" icon="magnifying-glass" href="/api-referansi/arama">
+    Elasticsearch ile tam metin arama ve istatistikler
+  </Card>
+</CardGroup>
+
+## Kimlik Dogrulama Gereksinimleri
+
+Tum `/api/*` yollari kimlik dogrulama gerektirir, **tek istisna** `/api/auth/**` yollaridir.
+
+| Yol Deseni | Kimlik Dogrulama |
+| --- | --- |
+| `/api/auth/**` | Gerekli degil (herkese acik) |
+| `/api/orders/**` | Session cookie (oturum cerezi) gerekli |
+| `/api/products/**` | Session cookie gerekli |
+| `/api/notifications/**` | Session cookie gerekli |
+| `/api/search/**` | Session cookie gerekli |
+| `/health` | Gerekli degil |
+| `/metrics` | Gerekli degil |
+
+<Note>
+  Kimlik dogrulama, Better Auth kutuphanesi tarafindan yonetilir. Basarili giris sonrasinda tarayiciya bir session cookie (oturum cerezi) atanir. Sonraki tum isteklerde bu cerez otomatik olarak gonderilir.
+</Note>
+
+Kimlik dogrulama basarisiz oldugunda asagidaki yanit doner:
+
+```json
+{
+  "success": false,
+  "error": "Unauthorized"
+}
+```
+
+## Standart Yanit Formati
+
+Tum API endpoint'leri (ucnoktalar) tutarli bir JSON yapisi kullanir.
+
+<Tabs>
+  <Tab title="Basarili Yanit">
+    ```json
+    {
+      "success": true,
+      "data": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "customerName": "Ahmet Yilmaz",
+        "customerEmail": "ahmet@ornek.com",
+        "status": "pending"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Hatali Yanit">
+    ```json
+    {
+      "success": false,
+      "error": "Order not found"
+    }
+    ```
+  </Tab>
+  <Tab title="Validasyon Hatasi">
+    ```json
+    {
+      "success": false,
+      "error": "String must contain at least 1 character(s), Invalid email"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Rate Limiting (Hiz Sinirlamasi)
+
+API Gateway, IP adresine dayali hiz sinirlamasi uygular. Redis tabanli sliding window (kayan pencere) algoritmasi kullanilir.
+
+| Parametre | Deger |
+| --- | --- |
+| Maksimum istek | **200 istek / dakika** |
+| Pencere suresi | 60 saniye |
+| Kapsam | IP adresi basina |
+
+Her API yaniti asagidaki rate limit header'larini (basliklarini) icerir:
+
+```
+X-RateLimit-Limit: 200
+X-RateLimit-Remaining: 195
+X-RateLimit-Reset: 45
+```
+
+| Header | Aciklama |
+| --- | --- |
+| `X-RateLimit-Limit` | Pencere basina izin verilen maksimum istek sayisi |
+| `X-RateLimit-Remaining` | Kalan istek sayisi |
+| `X-RateLimit-Reset` | Pencerenin sifirlanmasina kalan sure (saniye cinsinden) |
+
+<Warning>
+  Rate limit asimindan sonra tum istekler `429 Too Many Requests` durum kodu ile reddedilir. Pencere suresi dolana kadar beklemeniz gerekmektedir.
+</Warning>
+
+Rate limit asildigi zaman donen yanit:
+
+```json
+{
+  "success": false,
+  "error": "Too many requests"
+}
+```
+
+## HTTP Hata Kodlari
+
+| Durum Kodu | Anlami | Aciklama |
+| --- | --- | --- |
+| `400` | Bad Request | Gecersiz istek govdesi veya parametreler. Zod dogrulama hatalari bu kodla doner. |
+| `401` | Unauthorized | Oturum cerezi eksik veya gecersiz. Giris yapmaniz gerekmektedir. |
+| `404` | Not Found | Istenen kaynak (siparis, urun vb.) bulunamadi. |
+| `422` | Unprocessable Entity | Is mantigi hatasi. Ornegin: saga checkout sirasinda yetersiz stok veya odeme basarisizligi. |
+| `429` | Too Many Requests | Rate limit asildi. `X-RateLimit-Reset` basligindaki sureyi bekleyin. |
+
+## Servis Yonlendirme Tablosu
+
+API Gateway, gelen istekleri ilgili mikroservise yonlendirir:
+
+| Gateway Yolu | Hedef Servis | Dahili Port |
+| --- | --- | --- |
+| `/api/auth/**` | Better Auth (gateway icinde) | 3000 |
+| `/api/orders/**` | Order Service (Siparis Servisi) | 3001 |
+| `/api/notifications/**` | Notification Service (Bildirim Servisi) | 3002 |
+| `/api/products/**` | Inventory Service (Envanter Servisi) | 3003 |
+| `/api/search/**` | Search Service (Arama Servisi) | 3004 |
+
+<Tip>
+  Gelistirme ortaminda servisleri dogrudan dahili portlarindan da test edebilirsiniz. Ornegin, Order Service'e dogrudan `http://localhost:3001/orders` adresinden erisebilirsiniz. Ancak bu durumda kimlik dogrulama atlanmis olur.
+</Tip>
+
+## Saglik Kontrolu
+
+Her servis bir `/health` endpoint'i sunar. Gateway uzerinden saglik kontrolu yapmak icin:
+
+```bash
+curl http://localhost:3000/health
+```
+
+```json
+{
+  "status": "ok",
+  "service": "api-gateway",
+  "timestamp": "2026-03-03T10:30:00.000Z",
+  "uptime": 3600.5
+}
+```

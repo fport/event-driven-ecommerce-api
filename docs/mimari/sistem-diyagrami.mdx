@@ -1,0 +1,341 @@
+---
+title: "Sistem Diyagrami"
+description: "Tüm sistem bilesenlerinin mimari diyagrami, port tablosu ve container yapisi"
+---
+
+# Sistem Diyagrami
+
+Bu sayfa, event-driven e-ticaret projesinin tüm sistem bilesenlerini, ag topolojisini
+ve veri akis yollarini gorsellestirmektedir.
+
+---
+
+## Genel Sistem Mimarisi
+
+Asagidaki diyagram, tüm sistem bilesenlerini ve aralarindaki iliskileri gostermektedir:
+
+```mermaid
+graph TB
+    subgraph "Istemci Katmani"
+        WEB[Web Uygulamasi]
+        MOB[Mobil Uygulama]
+    end
+
+    subgraph "API Katmani"
+        GW[API Gateway<br/>:3000]
+        AUTH[Better Auth<br/>Email + OAuth]
+        RL[Rate Limiter<br/>200 req/min]
+        CB[Circuit Breaker<br/>5 hata / 30s reset]
+    end
+
+    subgraph "Uygulama Servisleri"
+        OS[Order Service<br/>:3001]
+        NS[Notification Service<br/>:3002]
+        IS[Inventory Service<br/>:3003]
+        SS[Search Service<br/>:3004]
+    end
+
+    subgraph "Mesajlasma"
+        RMQ[RabbitMQ<br/>:5672 / :15672]
+        EX["orders.exchange\n(Topic Exchange)"]
+    end
+
+    subgraph "Veri Katmani"
+        PG_P[(PostgreSQL Primary<br/>:5432)]
+        PG_R[(PostgreSQL Replica<br/>:5433)]
+        RD[(Redis<br/>:6379)]
+        MG[(MongoDB<br/>:27017)]
+        ES[(Elasticsearch<br/>:9200)]
+    end
+
+    subgraph "Izleme ve Gozlemleme"
+        APM[APM Server<br/>:8200]
+        PROM[Prometheus<br/>:9090]
+        GRAF[Grafana<br/>:3100]
+        KIB[Kibana<br/>:5601]
+    end
+
+    WEB --> GW
+    MOB --> GW
+    GW --> AUTH
+    GW --> RL
+    GW --> CB
+
+    GW -->|HTTP| OS
+    GW -->|HTTP| NS
+    GW -->|HTTP| IS
+    GW -->|HTTP| SS
+
+    OS -->|Publish| RMQ
+    RMQ --> EX
+    EX -->|Subscribe| NS
+    EX -->|Subscribe| IS
+    EX -->|Subscribe| SS
+
+    OS --> PG_P
+    OS -.->|Read| PG_R
+    OS --> RD
+    GW --> PG_P
+    NS --> MG
+    IS --> RD
+    SS --> ES
+
+    OS -.-> APM
+    NS -.-> APM
+    IS -.-> APM
+    SS -.-> APM
+
+    PROM -.->|Scrape| OS
+    PROM -.->|Scrape| NS
+    PROM -.->|Scrape| IS
+    PROM -.->|Scrape| SS
+    GRAF -.-> PROM
+    KIB -.-> ES
+
+    PG_P -->|Streaming Replication| PG_R
+
+    style GW fill:#6c5ce7,color:#fff
+    style RMQ fill:#ff6348,color:#fff
+    style PG_P fill:#336791,color:#fff
+    style PG_R fill:#336791,color:#fff
+    style RD fill:#dc382d,color:#fff
+    style MG fill:#4db33d,color:#fff
+    style ES fill:#f0bf2a,color:#000
+```
+
+---
+
+## Port Tablosu
+
+### Uygulama Servisleri
+
+| Servis | Port | Veritabani | Aciklama |
+|--------|------|-----------|----------|
+| **API Gateway** | 3000 | PostgreSQL (auth) | Istek yonlendirme, kimlik dogrulama, hiz sinirlandirma |
+| **Order Service** | 3001 | PostgreSQL + Redis | Siparis yonetimi, Saga orkestrasyon |
+| **Notification Service** | 3002 | MongoDB | Bildirim gonderimi ve gecmis kaydi |
+| **Inventory Service** | 3003 | Redis | Stok yonetimi ve rezervasyon |
+| **Search Service** | 3004 | Elasticsearch | Tam metin arama ve filtreleme |
+
+### Altyapi Servisleri
+
+| Servis | Port | Protokol | Aciklama |
+|--------|------|----------|----------|
+| **PostgreSQL Primary** | 5432 | TCP | Ana veritabani (okuma + yazma) |
+| **PostgreSQL Replica** | 5433 | TCP | Kopya veritabani (sadece okuma) |
+| **Redis** | 6379 | TCP | Onbellek ve stok deposu |
+| **MongoDB** | 27017 | TCP | Bildirim veri deposu |
+| **Elasticsearch** | 9200 | HTTP | Arama motoru |
+| **RabbitMQ** | 5672 | AMQP | Mesaj kuyrugu (AMQP protokolü) |
+| **RabbitMQ UI** | 15672 | HTTP | Yonetim arayüzü |
+
+### Izleme ve Gozlemleme Servisleri
+
+| Servis | Port | Aciklama |
+|--------|------|----------|
+| **Kibana** | 5601 | Elasticsearch goruntüleme ve analiz arayüzü |
+| **APM Server** | 8200 | Uygulama performans izleme |
+| **Prometheus** | 9090 | Metrik toplama ve sorgulama |
+| **Grafana** | 3100 | Metrik goruntüleme ve dashboard |
+
+---
+
+## Docker Container Diyagrami
+
+Proje toplamda **14 Docker container** icermektedir. Tüm container'lar `docker-compose.yml`
+dosyasi ile yonetilir.
+
+```mermaid
+graph TB
+    subgraph "docker-compose.yml"
+        subgraph "Uygulama Container'lari"
+            C1["api-gateway\n(Bun + Hono)"]
+            C2["order-service\n(Bun + Hono)"]
+            C3["notification-service\n(Bun + Hono)"]
+            C4["inventory-service\n(Bun + Hono)"]
+            C5["search-service\n(Bun + Hono)"]
+        end
+
+        subgraph "Veritabani Container'lari"
+            C6["postgres-primary\n(PostgreSQL 16)"]
+            C7["postgres-replica\n(PostgreSQL 16)"]
+            C8["redis\n(Redis 7)"]
+            C9["mongodb\n(MongoDB 7)"]
+            C10["elasticsearch\n(ES 8)"]
+        end
+
+        subgraph "Mesajlasma"
+            C11["rabbitmq\n(RabbitMQ 3.13)"]
+        end
+
+        subgraph "Izleme"
+            C12["kibana\n(Kibana 8)"]
+            C13["apm-server\n(APM 8)"]
+            C14["prometheus\n(Prometheus)"]
+            C15["grafana\n(Grafana)"]
+        end
+    end
+
+    style C1 fill:#6c5ce7,color:#fff
+    style C2 fill:#00b894,color:#fff
+    style C3 fill:#fdcb6e,color:#000
+    style C4 fill:#e17055,color:#fff
+    style C5 fill:#0984e3,color:#fff
+    style C6 fill:#336791,color:#fff
+    style C7 fill:#336791,color:#fff
+    style C8 fill:#dc382d,color:#fff
+    style C9 fill:#4db33d,color:#fff
+    style C10 fill:#f0bf2a,color:#000
+    style C11 fill:#ff6348,color:#fff
+```
+
+<Note>
+  Grafana ve Prometheus dahil edildiginde toplam container sayisi 15'e cikabilir.
+  Gelistirme ortaminda tüm container'lar ayni anda calistirilabilir ancak en az
+  **8 GB RAM** onerilir.
+</Note>
+
+---
+
+## Ag Topolojisi (Network Topology)
+
+Docker Compose, tüm container'lar icin tek bir bridge network olusturur. Container'lar
+birbirine servis adi (service name) ile erisir.
+
+```mermaid
+graph LR
+    subgraph "Docker Bridge Network: ecommerce-network"
+        GW["api-gateway"] -->|"order-service:3001"| OS["order-service"]
+        GW -->|"notification-service:3002"| NS["notification-service"]
+        GW -->|"inventory-service:3003"| IS["inventory-service"]
+        GW -->|"search-service:3004"| SS["search-service"]
+
+        OS -->|"postgres-primary:5432"| PG["postgres-primary"]
+        OS -->|"postgres-replica:5433"| PGR["postgres-replica"]
+        OS -->|"redis:6379"| RD["redis"]
+        OS -->|"rabbitmq:5672"| RMQ["rabbitmq"]
+
+        NS -->|"mongodb:27017"| MG["mongodb"]
+        NS -->|"rabbitmq:5672"| RMQ
+
+        IS -->|"redis:6379"| RD
+        IS -->|"rabbitmq:5672"| RMQ
+
+        SS -->|"elasticsearch:9200"| ES["elasticsearch"]
+        SS -->|"rabbitmq:5672"| RMQ
+    end
+
+    EXT["Dis Dünya<br/>(localhost)"] -->|":3000"| GW
+    EXT -->|":15672"| RMQ
+    EXT -->|":5601"| KIB["kibana"]
+    EXT -->|":9090"| PROM["prometheus"]
+    EXT -->|":3100"| GRAF["grafana"]
+```
+
+<Warning>
+  Uretim ortaminda (production) yalnizca API Gateway portu (3000) dis dünyaya acik
+  olmalidir. Veritabani portlari, RabbitMQ ve izleme araclari yalnizca ic ag
+  üzerinden erisilebilir olmalidir.
+</Warning>
+
+---
+
+## Veri Akis Genel Bakis
+
+Sistemdeki veri akisi üc ana katmandan olusur:
+
+<Steps>
+  <Step title="Istek Alimi (Ingress)">
+    Istemci istegi API Gateway'e ulasir. Gateway, kimlik dogrulama, hiz sinirlandirma
+    ve circuit breaker kontrollerini uygular.
+  </Step>
+  <Step title="Is Mantigi (Business Logic)">
+    Ilgili mikroservis istegi isler. Veritabani islemleri gerceklestirilir. Gerektiginde
+    domain event'ler olusturulur.
+  </Step>
+  <Step title="Olay Yayilimi (Event Propagation)">
+    Domain event RabbitMQ'ya yayinlanir. Topic Exchange, mesaji ilgili kuyruklara
+    yonlendirir. Tuketici servisler mesaji isler.
+  </Step>
+  <Step title="Yanit (Response)">
+    Senkron islemlerde yanit dogrudan istemciye doner. Asenkron islemler (bildirim,
+    indeksleme) arka planda tamamlanir.
+  </Step>
+</Steps>
+
+---
+
+## Katmanli Mimari Görünümü
+
+```mermaid
+graph TB
+    subgraph "Sunum Katmani (Presentation)"
+        WEB["Web / Mobil Istemci"]
+    end
+
+    subgraph "API Katmani (API Layer)"
+        GW["API Gateway\nAuth + Rate Limit + Circuit Breaker"]
+    end
+
+    subgraph "Servis Katmani (Service Layer)"
+        OS["Order Service"]
+        NS["Notification Service"]
+        IS["Inventory Service"]
+        SS["Search Service"]
+    end
+
+    subgraph "Mesajlasma Katmani (Messaging)"
+        RMQ["RabbitMQ\nTopic Exchange + DLQ"]
+    end
+
+    subgraph "Veri Katmani (Data Layer)"
+        PG["PostgreSQL\nPrimary + Replica"]
+        RD["Redis"]
+        MG["MongoDB"]
+        ES["Elasticsearch"]
+    end
+
+    subgraph "Gozlemleme Katmani (Observability)"
+        APM["APM Server"]
+        PROM["Prometheus"]
+        GRAF["Grafana"]
+        KIB["Kibana"]
+    end
+
+    WEB --> GW
+    GW --> OS
+    GW --> NS
+    GW --> IS
+    GW --> SS
+
+    OS <--> RMQ
+    NS <--> RMQ
+    IS <--> RMQ
+    SS <--> RMQ
+
+    OS --> PG
+    OS --> RD
+    NS --> MG
+    IS --> RD
+    SS --> ES
+
+    OS -.-> APM
+    NS -.-> APM
+    IS -.-> APM
+    SS -.-> APM
+    PROM -.-> GRAF
+    ES -.-> KIB
+
+    style GW fill:#6c5ce7,color:#fff
+    style RMQ fill:#ff6348,color:#fff
+    style PG fill:#336791,color:#fff
+    style RD fill:#dc382d,color:#fff
+    style MG fill:#4db33d,color:#fff
+    style ES fill:#f0bf2a,color:#000
+```
+
+<Tip>
+  Sistemi ayaga kaldirmak icin: `docker-compose up -d` komutu yeterlidir. Tüm servisler,
+  veritabanlari ve izleme araclari otomatik olarak baslatilir. Servisler arasindaki
+  bagimliliklar `depends_on` ile tanimlanmistir.
+</Tip>

@@ -1,0 +1,356 @@
+---
+title: "Read/Write Splitting"
+description: "PostgreSQL streaming replication ile okuma-yazma ayristirmasi stratejisi"
+---
+
+# Read/Write Splitting (Okuma-Yazma Ayristirmasi)
+
+Read/Write Splitting, veritabani islemlerini **yazma** (INSERT, UPDATE, DELETE) ve **okuma**
+(SELECT) olarak ikiye ayirip farkli veritabani sunucularina yonlendirme stratejisidir.
+Yazma islemleri primary (birincil) sunucuya, okuma islemleri ise replica (kopya) sunucuya
+yonlendirilir.
+
+Bu projede **PostgreSQL Streaming Replication** kullanilarak primary-replica yapilanmasi
+olusturulmustur. Uygulama katmaninda ise **Drizzle ORM** ile iki ayri baglanti havuzu
+(connection pool) tanimlanarak okuma ve yazma islemleri otomatik olarak ayristirilmistir.
+
+<CardGroup cols={3}>
+  <Card title="Primary (Birincil)" icon="pen-to-square">
+    Yazma islemleri: INSERT, UPDATE, DELETE. Tum veri degisiklikleri burada gerceklesir.
+  </Card>
+  <Card title="Replica (Kopya)" icon="book-open-reader">
+    Okuma islemleri: SELECT. Primary'den surekli olarak veriler kopyalanir.
+  </Card>
+  <Card title="Streaming Replication" icon="arrows-rotate">
+    PostgreSQL WAL (Write-Ahead Log) kayitlari surekli olarak replica'ya aktarilir.
+  </Card>
+</CardGroup>
+
+---
+
+## Mimari Diyagram
+
+```mermaid
+flowchart TD
+    subgraph Uygulama Katmani
+        OS[Order Service]
+        DB["db (Drizzle)\nYazma Islemleri"]
+        RDB["readDb (Drizzle)\nOkuma Islemleri"]
+    end
+
+    subgraph PostgreSQL Kumesi
+        P[(Primary\npostgres-primary:5432)]
+        R[(Replica\npostgres-replica:5433)]
+    end
+
+    OS --> DB
+    OS --> RDB
+
+    DB -->|"INSERT / UPDATE / DELETE"| P
+    RDB -->|"SELECT (readonly)"| R
+
+    P -->|"WAL Streaming\nReplication"| R
+
+    style P fill:#ff6b6b,color:#fff
+    style R fill:#4ecdc4,color:#fff
+    style DB fill:#ff6b6b,color:#fff
+    style RDB fill:#4ecdc4,color:#fff
+```
+
+---
+
+## Drizzle ORM Dual Baglanti Yapilandirmasi
+
+Okuma ve yazma islemleri icin iki ayri Drizzle istemcisi tanimlanir:
+
+<CodeGroup>
+```typescript db/index.ts
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import * as schema from "./schema";
+
+// Primary (yazma) baglantisi
+const primaryUrl = process.env.DATABASE_URL
+  || "postgres://postgres:postgres@localhost:5432/orders";
+
+// Replica (okuma) baglantisi - yoksa primary'e duser (fallback)
+const replicaUrl = process.env.DATABASE_REPLICA_URL || primaryUrl;
+
+// Primary istemci - tum islem tipleri
+const primaryClient = postgres(primaryUrl);
+
+// Replica istemci - sadece okuma (readonly: true)
+const replicaClient = postgres(replicaUrl, { readonly: true });
+
+/** Yazma islemleri (INSERT, UPDATE, DELETE) */
+export const db = drizzle(primaryClient, { schema });
+
+/** Okuma islemleri (SELECT) - replica'ya yonlendirilir */
+export const readDb = drizzle(replicaClient, { schema });
+```
+</CodeGroup>
+
+### Satir Satir Aciklama
+
+| Satir | Aciklama |
+|-------|----------|
+| `const primaryUrl = process.env.DATABASE_URL \|\| "..."` | Primary veritabani URL'si ortam degiskeninden alinir, yoksa varsayilan kullanilir |
+| `const replicaUrl = process.env.DATABASE_REPLICA_URL \|\| primaryUrl` | Replica URL'si ortam degiskeninden alinir. **Tanimlanmamissa primary URL'ye duser** (fallback). Bu, tek veritabanili ortamlarda da calismayi saglar |
+| `postgres(replicaUrl, { readonly: true })` | Replica baglantisi `readonly` modunda acilir. Bu, yanlislikla yazma islemi yapilmasini engeller |
+| `export const db = drizzle(primaryClient, { schema })` | Yazma islemleri icin kullanilacak Drizzle istemcisi |
+| `export const readDb = drizzle(replicaClient, { schema })` | Okuma islemleri icin kullanilacak Drizzle istemcisi |
+
+<Note>
+  `readonly: true` parametresi `postgres` (postgres.js) kutuphanesinde baglantiyi salt okunur
+  modda acar. Bu modda `INSERT`, `UPDATE` veya `DELETE` gibi yazma islemleri denenirse hata
+  firlatilir. Bu, gelistirme sirasinda yanlislikla replica'ya yazma yapilmasini onleyen bir
+  guvenlik katmani saglar.
+</Note>
+
+---
+
+## Kullanim Ornekleri
+
+<Tabs>
+  <Tab title="Okuma Islemleri (readDb)">
+    Tum `SELECT` sorgulari `readDb` uzerinden yapilir:
+
+    ```typescript
+    import { readDb } from "./db";
+    import { orders } from "./db/schema";
+    import { eq } from "drizzle-orm";
+
+    // Tum siparisleri listele
+    async function getAllOrders() {
+      return await readDb.query.orders.findMany();
+    }
+
+    // Tekil siparis getir
+    async function getOrderById(id: string) {
+      return await readDb.query.orders.findFirst({
+        where: eq(orders.id, id),
+      });
+    }
+
+    // Filtrelenmiş sorgu
+    async function getOrdersByStatus(status: string) {
+      return await readDb.query.orders.findMany({
+        where: eq(orders.status, status),
+      });
+    }
+    ```
+  </Tab>
+
+  <Tab title="Yazma Islemleri (db)">
+    Tum `INSERT`, `UPDATE` ve `DELETE` islemleri `db` uzerinden yapilir:
+
+    ```typescript
+    import { db } from "./db";
+    import { orders } from "./db/schema";
+    import { eq } from "drizzle-orm";
+
+    // Yeni siparis olustur
+    async function createOrder(order: NewOrder) {
+      return await db.insert(orders).values(order).returning();
+    }
+
+    // Siparis durumunu guncelle
+    async function updateOrderStatus(id: string, status: string) {
+      return await db
+        .update(orders)
+        .set({ status, updatedAt: new Date() })
+        .where(eq(orders.id, id))
+        .returning();
+    }
+
+    // Siparis sil
+    async function deleteOrder(id: string) {
+      return await db.delete(orders).where(eq(orders.id, id));
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Hangi Baglanti Ne Zaman Kullanilmali?
+
+| Islem Tipi | Baglanti | Ornek SQL | Aciklama |
+|------------|----------|-----------|----------|
+| Listeleme | `readDb` | `SELECT * FROM orders` | Okuma yuku replica'ya dagitilir |
+| Tekil kayit getirme | `readDb` | `SELECT * FROM orders WHERE id = ?` | Okuma yuku replica'ya dagitilir |
+| Arama / filtreleme | `readDb` | `SELECT * FROM orders WHERE status = ?` | Okuma yuku replica'ya dagitilir |
+| Yeni kayit olusturma | `db` | `INSERT INTO orders ...` | Sadece primary'ye yazilir |
+| Kayit guncelleme | `db` | `UPDATE orders SET ... WHERE id = ?` | Sadece primary'ye yazilir |
+| Kayit silme | `db` | `DELETE FROM orders WHERE id = ?` | Sadece primary'ye yazilir |
+| Yazma sonrasi okuma | `db` | `INSERT ... RETURNING *` | Tutarlilik icin primary'den okunur |
+
+<Tip>
+  **Yazma sonrasi okuma (read-after-write)** durumunda `db` (primary) kullanilmalidir.
+  Ornegin, yeni bir siparis olusturup hemen sonucunu dondururken `RETURNING *` ifadesi
+  primary'den okuma yapar. Eger bunun yerine `readDb` kullanilsaydi, replication lag
+  nedeniyle henuz kopyalanmamis veri gorulemeyebilirdi.
+</Tip>
+
+---
+
+## Replication Lag (Kopyalama Gecikmesi)
+
+Streaming replication'da primary'ye yazilan veriler, replica'ya **yakin gercek zamanli** olarak
+kopyalanir. Ancak kucuk bir gecikme (lag) her zaman mevcuttur:
+
+```mermaid
+sequenceDiagram
+    participant C as Istemci
+    participant P as Primary
+    participant R as Replica
+
+    C->>P: INSERT INTO orders (yeni siparis)
+    P->>P: WAL kaydı olusturulur
+    P-->>C: 201 Created (basarili)
+    P->>R: WAL streaming (async)
+
+    Note over P,R: Replication lag\n(genellikle < 100ms)
+
+    C->>R: SELECT * FROM orders (hemen sonra)
+    R-->>C: Veri henuz mevcut olmayabilir!
+```
+
+### Replication Lag Senaryolari
+
+| Senaryo | Risk | Cozum |
+|---------|------|-------|
+| Siparis olustur + hemen listele | Yeni siparis listede gorunmeyebilir | `RETURNING *` ile primary'den oku |
+| Siparis guncelle + hemen oku | Eski deger gorulebilir | Guncellemeyi `db` uzerinden `RETURNING` ile yap |
+| Raporlama sorgulari | Dusuk risk - saniyeler tolere edilebilir | `readDb` kullanilabilir |
+| Dashboard verileri | Dusuk risk - kisa gecikme kabul edilebilir | `readDb` kullanilabilir |
+
+<Warning>
+  Replication lag normalde birkaç milisaniyedir, ancak yuksek yazma yuku altinda artabilir.
+  Uretim ortaminda replication lag degerini izlemek icin Prometheus metrikleri (orn:
+  `pg_replication_lag`) tanimlanmalidir. Lag belirli bir esigi astiginda alarm
+  uretilmelidir.
+</Warning>
+
+---
+
+## Fallback (Geri Donus) Mekanizmasi
+
+Replica URL'si ortam degiskeninde tanimlanmamissa, sistem otomatik olarak primary URL'yi
+kullanir:
+
+```typescript
+const replicaUrl = process.env.DATABASE_REPLICA_URL || primaryUrl;
+```
+
+Bu tasarim karari su durumlarda faydalidir:
+
+<CardGroup cols={2}>
+  <Card title="Yerel Gelistirme" icon="laptop-code">
+    Gelistiriciler genellikle tek bir PostgreSQL instance'i calistirir.
+    `DATABASE_REPLICA_URL` tanimlanmadigi icin tum islemler ayni veritabanina gider.
+    Uygulama kodu degisiklik gerektirmez.
+  </Card>
+  <Card title="Uretim Ortami" icon="cloud">
+    Docker Compose veya Kubernetes ortaminda `DATABASE_REPLICA_URL` tanimlanir ve
+    okuma islemleri replica'ya yonlendirilir. Uygulama kodu yine degisiklik gerektirmez.
+  </Card>
+</CardGroup>
+
+---
+
+## Ortam Degiskenleri
+
+| Degisken | Varsayilan | Aciklama |
+|----------|------------|----------|
+| `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/orders` | Primary veritabani baglanti URL'si |
+| `DATABASE_REPLICA_URL` | `DATABASE_URL` degerine duser | Replica veritabani baglanti URL'si |
+
+Docker Compose ortaminda tipik yapilandirma:
+
+```yaml
+# docker-compose.yml
+services:
+  order-service:
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres-primary:5432/orders
+      DATABASE_REPLICA_URL: postgres://postgres:postgres@postgres-replica:5432/orders
+```
+
+---
+
+## PostgreSQL Streaming Replication Nasil Calisir?
+
+<Steps>
+  <Step title="WAL Kayitlari Olusturulur">
+    Primary veritabaninda yapilan her degisiklik, WAL (Write-Ahead Log) dosyalarina
+    kaydedilir. WAL, veritabaninin tutarliligini saglayan ve crash recovery icin
+    kullanilan bir gunluk mekanizmasidir.
+  </Step>
+
+  <Step title="WAL Streaming Baslar">
+    Replica, primary'ye baglanir ve WAL kayitlarini **surekli** (streaming) olarak
+    alir. Bu islem, dosya tabanli log shipping'den farkli olarak neredeyse gercek
+    zamanli bir aktarim saglar.
+  </Step>
+
+  <Step title="Replica WAL'i Uygular">
+    Replica, aldigi WAL kayitlarini kendi veritabanina uygulayarak primary ile
+    senkronize kalir. Bu islem sirasinda replica salt okunur (read-only) modda
+    calisir ve okuma sorgularini kabul edebilir.
+  </Step>
+
+  <Step title="Okuma Sorgulari Karsilanir">
+    Uygulama, `readDb` uzerinden okuma sorgularini replica'ya yonlendirir. Replica,
+    guncel verileri (replication lag kadar gecikmeyle) sunar ve primary uzerindeki
+    okuma yukunu azaltir.
+  </Step>
+</Steps>
+
+---
+
+## Avantajlar ve Dikkat Edilmesi Gerekenler
+
+<Tabs>
+  <Tab title="Avantajlar">
+    - **Performans**: Okuma yuku primary'den alinarak replica'ya dagitilir. Yazma islemleri etkilenmez.
+    - **Olceklenebilirlik**: Birden fazla replica ekleyerek okuma kapasitesi artirilabilir.
+    - **Yuksek Erisilebilirlik**: Primary cokerse replica, primary olarak yukseltileblir (failover).
+    - **Basitlik**: Drizzle ORM ile iki satir degisiklikle okuma-yazma ayristirmasi saglanir.
+    - **Seffaf Fallback**: Replica URL tanimlanmazsa otomatik olarak primary kullanilir.
+  </Tab>
+
+  <Tab title="Dikkat Edilmesi Gerekenler">
+    - **Replication Lag**: Yazma sonrasi okuma islemlerinde tutarsizlik olusabilir.
+    - **Replica Kapasitesi**: Replica da kaynak (CPU, bellek, disk) tuketir.
+    - **Failover**: Otomatik failover mekanizmasi ayrica yapilandirilmalidir.
+    - **Sorgu Yonlendirme**: Gelistiricilerin dogru baglanti nesnesini (`db` vs `readDb`) secmesi gerekir.
+    - **Schema Degisiklikleri**: DDL (Data Definition Language) islemleri yalnizca primary uzerinde yapilir ve replica'ya otomatik yansir.
+  </Tab>
+</Tabs>
+
+---
+
+## Kaynak Kod
+
+**`services/order-service/src/db/index.ts`**
+
+<CodeGroup>
+```typescript db/index.ts (tam kaynak)
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import * as schema from "./schema";
+
+const primaryUrl = process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/orders";
+const replicaUrl = process.env.DATABASE_REPLICA_URL || primaryUrl;
+
+const primaryClient = postgres(primaryUrl);
+const replicaClient = postgres(replicaUrl, { readonly: true });
+
+/** Write operations (INSERT, UPDATE, DELETE) */
+export const db = drizzle(primaryClient, { schema });
+
+/** Read operations (SELECT) — routed to replica */
+export const readDb = drizzle(replicaClient, { schema });
+```
+</CodeGroup>

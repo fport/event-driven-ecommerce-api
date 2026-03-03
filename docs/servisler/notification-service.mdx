@@ -1,0 +1,287 @@
+---
+title: "Notification Service"
+description: "Siparis olaylarini RabbitMQ uzerinden dinleyen, bildirimleri MongoDB'ye kaydeden ve DLQ ile hata yonetimi saglayan bildirim servisi."
+---
+
+# Notification Service
+
+Notification Service, siparis olaylarina abone olarak bildirimleri isler ve MongoDB'ye kaydeder. RabbitMQ consumer (tuketici) olarak calisir ve hata durumlarini DLQ (Dead Letter Queue - olu mektup kuyrugu) mekanizmasi ile yonetir.
+
+**Port:** 3002
+**Veritabani:** MongoDB
+**Framework:** Hono.dev
+
+## Mimari Genel Bakis
+
+```mermaid
+graph LR
+    OS[Order Service]
+    OS -->|order.created / order.updated| RMQ[RabbitMQ]
+    RMQ -->|notification.orders kuyrugu| NS[Notification Service]
+    NS -->|Kaydet| MONGO[(MongoDB)]
+    RMQ -->|Basarisiz mesajlar| DLQ[orders.dlq]
+```
+
+## MongoDB Veri Modeli
+
+Bildirimler MongoDB'de `notifications` koleksiyonunda saklanir:
+
+```typescript
+// services/notification-service/src/db.ts
+export interface NotificationRecord {
+  orderId: string;
+  customerName: string;
+  customerEmail: string;
+  type: string;           // "order.created" veya "order.updated"
+  message: string;
+  sentAt: Date;
+}
+```
+
+Ornek bir bildirim belgesi:
+
+```json
+{
+  "orderId": "550e8400-e29b-41d4-a716-446655440000",
+  "customerName": "Ahmet Yilmaz",
+  "customerEmail": "ahmet@example.com",
+  "type": "order.created",
+  "message": "Order 550e8400-... - order.created: pending",
+  "sentAt": "2026-03-03T10:00:00.000Z"
+}
+```
+
+### MongoDB Baglanti Yapilandirmasi
+
+```typescript
+// services/notification-service/src/db.ts
+import { MongoClient, type Db, type Collection } from "mongodb";
+
+const url = process.env.MONGODB_URL
+  || "mongodb://localhost:27017/notifications";
+
+const client = new MongoClient(url);
+let db: Db;
+
+export async function connectMongo(): Promise<void> {
+  await client.connect();
+  db = client.db();
+  console.log("MongoDB connected");
+}
+
+export function getNotificationsCollection(): Collection<NotificationRecord> {
+  return db.collection<NotificationRecord>("notifications");
+}
+```
+
+## RabbitMQ Consumer Kurulumu
+
+Notification Service, RabbitMQ'ya baglanir ve siparis olaylarini dinler:
+
+```mermaid
+graph TB
+    subgraph "RabbitMQ"
+        EX["orders.exchange (topic)"]
+        Q["notification.orders"]
+        DLX["orders.exchange.dlx (fanout)"]
+        DLQ["orders.dlq"]
+    end
+
+    EX -->|"order.created"| Q
+    EX -->|"order.updated"| Q
+    Q -->|"x-dead-letter-exchange"| DLX
+    DLX --> DLQ
+```
+
+### Kuyruk Yapilandirmasi
+
+```typescript
+// services/notification-service/src/consumer.ts
+
+// Exchange tanimlari
+await channel.assertExchange(EXCHANGES.ORDERS, "topic", { durable: true });
+await channel.assertExchange(`${EXCHANGES.ORDERS}.dlx`, "fanout", { durable: true });
+
+// Ana kuyruk - DLQ destegi ile
+await channel.assertQueue(QUEUES.NOTIFICATION_ORDERS, {
+  durable: true,
+  arguments: {
+    "x-dead-letter-exchange": `${EXCHANGES.ORDERS}.dlx`,
+  },
+});
+
+// Routing key binding'leri
+await channel.bindQueue(
+  QUEUES.NOTIFICATION_ORDERS,
+  EXCHANGES.ORDERS,
+  ROUTING_KEYS.ORDER_CREATED  // "order.created"
+);
+await channel.bindQueue(
+  QUEUES.NOTIFICATION_ORDERS,
+  EXCHANGES.ORDERS,
+  ROUTING_KEYS.ORDER_UPDATED  // "order.updated"
+);
+
+// DLQ tanimlamasi
+await channel.assertQueue(QUEUES.DLQ_ORDERS, { durable: true });
+await channel.bindQueue(QUEUES.DLQ_ORDERS, `${EXCHANGES.ORDERS}.dlx`, "");
+
+// Prefetch limiti
+await channel.prefetch(10);
+```
+
+| Parametre                | Deger                       |
+|--------------------------|-----------------------------|
+| Exchange                 | `orders.exchange` (topic)   |
+| Kuyruk                   | `notification.orders`       |
+| Dinlenen routing key'ler | `order.created`, `order.updated` |
+| DLX                      | `orders.exchange.dlx` (fanout) |
+| DLQ                      | `orders.dlq`                |
+| Prefetch                 | 10 mesaj                    |
+| Durable                  | Evet                        |
+
+## DLQ / Retry Mekanizmasi
+
+Mesaj isleme sirasinda hata olusursa, mesaj en fazla **3 kez** yeniden denenir. Tum denemeler basarisiz olursa mesaj DLQ'ya gonderilir.
+
+```mermaid
+flowchart TD
+    MSG[Mesaj Geldi] --> PROCESS[Mesaji Isle]
+    PROCESS -->|Basarili| ACK[Onayla / ack]
+    PROCESS -->|Hata| CHECK{Deneme < 3?}
+    CHECK -->|Evet| RETRY[Yeniden Yayinla<br/>x-retry-count + 1]
+    CHECK -->|Hayir| DLQ[DLQ'ya Gonder<br/>nack]
+    RETRY --> MSG
+```
+
+```typescript
+// services/notification-service/src/consumer.ts
+const MAX_RETRIES = 3;
+
+channel.consume(QUEUES.NOTIFICATION_ORDERS, async (msg) => {
+  if (!msg) return;
+
+  const retryCount =
+    (msg.properties.headers?.["x-retry-count"] as number) || 0;
+
+  try {
+    const event: OrderEvent = JSON.parse(msg.content.toString());
+
+    // Bildirimi MongoDB'ye kaydet
+    const collection = getNotificationsCollection();
+    await collection.insertOne({
+      orderId: event.data.id,
+      customerName: event.data.customerName,
+      customerEmail: event.data.customerEmail,
+      type: event.type,
+      message: `Order ${event.data.id} - ${event.type}: ${event.data.status}`,
+      sentAt: new Date(),
+    });
+
+    channel.ack(msg);
+  } catch (err) {
+    if (retryCount < MAX_RETRIES) {
+      // Mesaji onayla ve yeni retry count ile yeniden yayinla
+      channel.ack(msg);
+      channel.publish(EXCHANGES.ORDERS, msg.fields.routingKey, msg.content, {
+        ...msg.properties,
+        headers: {
+          ...msg.properties.headers,
+          "x-retry-count": retryCount + 1,
+        },
+      });
+    } else {
+      // Maksimum deneme sayisina ulasildi, DLQ'ya gonder
+      channel.nack(msg, false, false);
+    }
+  }
+});
+```
+
+<Warning>
+  Retry mekanizmasi, mesaji `ack` edip yeni header ile yeniden yayinlayarak calisir. Bu yaklasim, mesajin RabbitMQ'da tekrar kuyruge eklenmesini saglar. `x-retry-count` header'i her denemede artirilir.
+</Warning>
+
+<Note>
+  Baglanti sirasinda 10 denemeye kadar yeniden baglanti denemesi yapilir. Her deneme arasinda 3 saniye beklenir. Bu, Docker Compose ortaminda RabbitMQ'nun hazir olmasini beklemek icin kullanilir.
+</Note>
+
+## API Endpoint'leri
+
+### Tum Bildirimleri Listeleme
+
+<CodeGroup>
+```bash Istek
+# Varsayilan limit: 50
+curl http://localhost:3002/notifications
+
+# Ozel limit ile
+curl http://localhost:3002/notifications?limit=10
+```
+
+```json Yanit
+{
+  "success": true,
+  "data": [
+    {
+      "_id": "65a1b2c3d4e5f6789012abcd",
+      "orderId": "550e8400-e29b-41d4-a716-446655440000",
+      "customerName": "Ahmet Yilmaz",
+      "customerEmail": "ahmet@example.com",
+      "type": "order.created",
+      "message": "Order 550e8400-... - order.created: pending",
+      "sentAt": "2026-03-03T10:00:00.000Z"
+    }
+  ]
+}
+```
+</CodeGroup>
+
+| Parametre | Tip    | Varsayilan | Aciklama                    |
+|-----------|--------|------------|-----------------------------|
+| `limit`   | number | 50         | Dondurulen bildirim sayisi  |
+
+Sonuclar `sentAt` alanina gore azalan sirada (en yeni basta) siralanir.
+
+### Siparise Gore Bildirimler
+
+<CodeGroup>
+```bash Istek
+curl http://localhost:3002/notifications/550e8400-e29b-41d4-a716-446655440000
+```
+
+```json Yanit
+{
+  "success": true,
+  "data": [
+    {
+      "_id": "65a1b2c3d4e5f6789012abcd",
+      "orderId": "550e8400-e29b-41d4-a716-446655440000",
+      "customerName": "Ahmet Yilmaz",
+      "customerEmail": "ahmet@example.com",
+      "type": "order.created",
+      "message": "Order 550e8400-... - order.created: pending",
+      "sentAt": "2026-03-03T10:00:00.000Z"
+    },
+    {
+      "_id": "65a1b2c3d4e5f6789012abce",
+      "orderId": "550e8400-e29b-41d4-a716-446655440000",
+      "customerName": "Ahmet Yilmaz",
+      "customerEmail": "ahmet@example.com",
+      "type": "order.updated",
+      "message": "Order 550e8400-... - order.updated: shipped",
+      "sentAt": "2026-03-03T12:00:00.000Z"
+    }
+  ]
+}
+```
+</CodeGroup>
+
+## Ortam Degiskenleri
+
+| Degisken           | Varsayilan                                   | Aciklama                  |
+|--------------------|----------------------------------------------|---------------------------|
+| `MONGODB_URL`      | `mongodb://localhost:27017/notifications`     | MongoDB baglanti adresi   |
+| `RABBITMQ_URL`     | `amqp://guest:guest@localhost:5672`           | RabbitMQ baglanti adresi  |
+| `APM_SERVICE_NAME` | `unknown`                                    | APM servis adi            |
+| `APM_SERVER_URL`   | -                                            | APM sunucu adresi         |

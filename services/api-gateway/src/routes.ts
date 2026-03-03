@@ -28,7 +28,7 @@ app.get("/health", (c) => {
 });
 
 // Better Auth routes (public) - signup, login, logout, session
-app.on(["GET", "POST"], "/api/auth/**", (c) => {
+app.on(["GET", "POST"], "/api/auth/*", (c) => {
   return auth.handler(c.req.raw);
 });
 

@@ -54,6 +54,7 @@ services:
       - DATABASE_REPLICA_URL=postgres://postgres:postgres@postgres-replica:5432/orders
       - REDIS_URL=redis://redis:6379
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - INVENTORY_SERVICE_URL=http://inventory-service:3003
       - APM_SERVER_URL=http://apm-server:8200
       - APM_SERVICE_NAME=order-service
     depends_on:

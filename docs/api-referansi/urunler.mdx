@@ -1,0 +1,338 @@
+---
+title: "Urunler"
+description: "Urun yonetimi, stok takibi ve envanter islemleri"
+---
+
+# Urun / Envanter API'si
+
+Envanter servisi (Inventory Service), urun ve stok yonetimini saglar. Urun verileri Redis uzerinde saklanir ve yuksek performansli okuma/yazma islemleri gerceklestirilir.
+
+<Note>
+  Tum urun endpoint'leri kimlik dogrulama gerektirir. Isteklerinize gecerli bir session cookie (oturum cerezi) eklemeniz gerekmektedir.
+</Note>
+
+## Tum Urunleri Listele
+
+Envanterdeki tum urunleri getirir.
+
+**`GET /api/products`**
+
+<CodeGroup>
+```bash cURL
+curl http://localhost:3000/api/products \
+  -b cookies.txt
+```
+
+```typescript fetch
+const response = await fetch("http://localhost:3000/api/products", {
+  credentials: "include",
+});
+const data = await response.json();
+```
+</CodeGroup>
+
+### Basarili Yanit
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "laptop-001",
+      "name": "Gaming Laptop",
+      "stock": 50,
+      "price": 15000
+    },
+    {
+      "id": "mouse-001",
+      "name": "Kablosuz Mouse",
+      "stock": 200,
+      "price": 350
+    }
+  ]
+}
+```
+
+## Urun Detayi Getir
+
+Belirli bir urunu ID'si ile getirir.
+
+**`GET /api/products/:id`**
+
+<CodeGroup>
+```bash cURL
+curl http://localhost:3000/api/products/laptop-001 \
+  -b cookies.txt
+```
+
+```typescript fetch
+const response = await fetch("http://localhost:3000/api/products/laptop-001", {
+  credentials: "include",
+});
+const data = await response.json();
+```
+</CodeGroup>
+
+### Yol Parametreleri
+
+| Parametre | Tip | Aciklama |
+| --- | --- | --- |
+| `id` | `string` | Urun kimlik numarasi |
+
+### Basarili Yanit
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "laptop-001",
+    "name": "Gaming Laptop",
+    "stock": 50,
+    "price": 15000
+  }
+}
+```
+
+### Hata Yaniti (404)
+
+```json
+{
+  "success": false,
+  "error": "Product not found"
+}
+```
+
+## Urun Olustur
+
+Yeni bir urun olusturur veya ayni ID ile mevcut urunu gunceller.
+
+**`POST /api/products`**
+
+<CodeGroup>
+```bash cURL
+curl -X POST http://localhost:3000/api/products \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{
+    "id": "laptop-001",
+    "name": "Gaming Laptop",
+    "stock": 50,
+    "price": 15000
+  }'
+```
+
+```typescript fetch
+const response = await fetch("http://localhost:3000/api/products", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  credentials: "include",
+  body: JSON.stringify({
+    id: "laptop-001",
+    name: "Gaming Laptop",
+    stock: 50,
+    price: 15000,
+  }),
+});
+const data = await response.json();
+```
+</CodeGroup>
+
+### Istek Govdesi
+
+| Alan | Tip | Gerekli | Aciklama |
+| --- | --- | --- | --- |
+| `id` | `string` | Evet | Urun kimlik numarasi (en az 1 karakter) |
+| `name` | `string` | Evet | Urun adi (en az 1 karakter) |
+| `stock` | `integer` | Evet | Baslangic stok miktari (negatif olamaz) |
+| `price` | `number` | Evet | Urun fiyati (pozitif sayi) |
+
+### Basarili Yanit (201)
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "laptop-001",
+    "name": "Gaming Laptop",
+    "stock": 50,
+    "price": 15000
+  }
+}
+```
+
+### Validasyon Hatasi (400)
+
+```json
+{
+  "success": false,
+  "error": "String must contain at least 1 character(s), Number must be greater than 0"
+}
+```
+
+## Stok Ayarla
+
+Mevcut bir urunun stok miktarini arttirir veya azaltir. Mevcut stoga `stockChange` degeri eklenir.
+
+**`PATCH /api/products/:id`**
+
+<CodeGroup>
+```bash cURL
+# Stok arttirma (+30 adet)
+curl -X PATCH http://localhost:3000/api/products/laptop-001 \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{
+    "stockChange": 30
+  }'
+
+# Stok azaltma (-5 adet)
+curl -X PATCH http://localhost:3000/api/products/laptop-001 \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{
+    "stockChange": -5
+  }'
+```
+
+```typescript fetch
+// Stok arttirma (+30 adet)
+const response = await fetch("http://localhost:3000/api/products/laptop-001", {
+  method: "PATCH",
+  headers: { "Content-Type": "application/json" },
+  credentials: "include",
+  body: JSON.stringify({ stockChange: 30 }),
+});
+
+// Stok azaltma (-5 adet)
+const response2 = await fetch("http://localhost:3000/api/products/laptop-001", {
+  method: "PATCH",
+  headers: { "Content-Type": "application/json" },
+  credentials: "include",
+  body: JSON.stringify({ stockChange: -5 }),
+});
+```
+</CodeGroup>
+
+### Istek Govdesi
+
+| Alan | Tip | Gerekli | Aciklama |
+| --- | --- | --- | --- |
+| `stockChange` | `number` | Evet | Stok degisim miktari. Pozitif deger stok arttirir, negatif deger stok azaltir. |
+
+### Stok Degisim Ornekleri
+
+| Mevcut Stok | `stockChange` | Yeni Stok | Sonuc |
+| --- | --- | --- | --- |
+| 50 | `+30` | 80 | Basarili |
+| 50 | `-20` | 30 | Basarili |
+| 50 | `-50` | 0 | Basarili |
+| 50 | `-51` | -1 | Hata: Yetersiz stok |
+
+### Basarili Yanit
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "laptop-001",
+    "name": "Gaming Laptop",
+    "stock": 80,
+    "price": 15000
+  }
+}
+```
+
+### Hata Yanitlari
+
+<Tabs>
+  <Tab title="Urun Bulunamadi (404)">
+    ```json
+    {
+      "success": false,
+      "error": "Product not found"
+    }
+    ```
+  </Tab>
+  <Tab title="Yetersiz Stok (400)">
+    ```json
+    {
+      "success": false,
+      "error": "Insufficient stock"
+    }
+    ```
+  </Tab>
+  <Tab title="Gecersiz Istek (400)">
+    ```json
+    {
+      "success": false,
+      "error": "stockChange is required"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Stok degisimi sonucunda stok miktari negatif olamaz. Mevcut stoktan fazla azaltma islemi `400 Bad Request` hatasi dondurur. Saga checkout sirasinda stok rezervasyonu icin bu endpoint dahili olarak kullanilir.
+</Warning>
+
+## Urun Sil
+
+Belirli bir urunu envanterden kalici olarak siler.
+
+**`DELETE /api/products/:id`**
+
+<CodeGroup>
+```bash cURL
+curl -X DELETE http://localhost:3000/api/products/laptop-001 \
+  -b cookies.txt
+```
+
+```typescript fetch
+const response = await fetch("http://localhost:3000/api/products/laptop-001", {
+  method: "DELETE",
+  credentials: "include",
+});
+const data = await response.json();
+```
+</CodeGroup>
+
+### Basarili Yanit
+
+```json
+{
+  "success": true
+}
+```
+
+### Hata Yaniti (404)
+
+```json
+{
+  "success": false,
+  "error": "Product not found"
+}
+```
+
+## Validasyon Semasi
+
+Urun olusturma istek govdesi Zod kutuphanesi ile dogrulanir:
+
+```typescript
+const productSchema = z.object({
+  id: z.string().min(1),            // Bos olamaz
+  name: z.string().min(1),          // Bos olamaz
+  stock: z.number().int().nonnegative(), // Negatif olmayan tam sayi (0 gecerli)
+  price: z.number().positive(),     // Sifirdan buyuk sayi
+});
+```
+
+| Alan | Kural | Ornek Gecerli | Ornek Gecersiz |
+| --- | --- | --- | --- |
+| `id` | En az 1 karakter | `"laptop-001"` | `""` |
+| `name` | En az 1 karakter | `"Gaming Laptop"` | `""` |
+| `stock` | Negatif olmayan tam sayi | `0`, `50`, `1000` | `-1`, `3.5` |
+| `price` | Sifirdan buyuk sayi | `0.01`, `15000` | `0`, `-100` |
+
+<Tip>
+  `POST /api/products` endpoint'i upsert (ekle veya guncelle) mantigi ile calisir. Ayni `id` ile tekrar cagrildiginda mevcut urun guncellenir. Bu ozellik, envanter senkronizasyonu ve toplu urun yuklemesi icin kullanislidir.
+</Tip>

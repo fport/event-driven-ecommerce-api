@@ -1,0 +1,64 @@
+---
+title: "Genel Bakis"
+description: "Event-Driven E-Commerce platformuna hosgeldiniz"
+---
+
+# Event-Driven E-Commerce Platform
+
+Bu proje, modern mikroservis mimarisi ile olusturulmus kapsamli bir e-ticaret platformudur. Event-Driven Architecture (Olaya Dayali Mimari) prensiplerini benimseyerek, gevrek baglanmis (loosely coupled) ve yuksek olceklenebilir (highly scalable) bir sistem tasarlanmistir.
+
+<CardGroup cols={2}>
+  <Card title="5 Mikroservis" icon="cubes">
+    API Gateway, Order, Notification, Inventory ve Search servisleri
+  </Card>
+  <Card title="Event-Driven" icon="bolt">
+    RabbitMQ topic exchange ile asenkron mesajlasma
+  </Card>
+  <Card title="Saga Pattern" icon="arrows-spin">
+    Dagitik islem yonetimi: stok kontrol, rezervasyon, odeme
+  </Card>
+  <Card title="Full Observability" icon="chart-line">
+    Prometheus, Grafana, APM ve yapilandirilmis loglama
+  </Card>
+</CardGroup>
+
+## Sistem Mimarisi
+
+```mermaid
+graph TB
+    Client[Istemci] --> GW[API Gateway :3000]
+    GW --> Auth[Better Auth]
+    GW --> OS[Order Service :3001]
+    GW --> IS[Inventory Service :3003]
+    GW --> NS[Notification Service :3002]
+    GW --> SS[Search Service :3004]
+
+    OS --> PG[(PostgreSQL Primary)]
+    OS --> PGR[(PostgreSQL Replica)]
+    OS --> Redis[(Redis Cache)]
+    OS --> RMQ{RabbitMQ}
+
+    IS --> Redis
+    NS --> Mongo[(MongoDB)]
+    SS --> ES[(Elasticsearch)]
+
+    RMQ --> NS
+    RMQ --> IS
+    RMQ --> SS
+
+    GW --> Prom[Prometheus]
+    Prom --> Graf[Grafana]
+```
+
+## Temel Ozellikler
+
+- **Mikroservis Mimarisi**: Her servis bagimsiz veritabani ve deploy sureci
+- **Event-Driven Communication**: RabbitMQ topic exchange ile asenkron iletisim
+- **Saga Pattern**: Dagitik islemler icin telafi mekanizmali (compensating) saga orkestrasyonu
+- **Circuit Breaker (Devre Kesici)**: Basarisiz servis cagrilarinda otomatik devre kesme
+- **Dead Letter Queue (Olum Mektup Kuyrugu)**: 3 deneme sonrasi basarisiz mesajlarin yonetimi
+- **Write-Through Cache**: Redis ile 5 dakika TTL'li onbellekleme stratejisi
+- **Read/Write Splitting**: PostgreSQL primary/replica ile okuma-yazma ayristirmasi
+- **Rate Limiting**: Gateway (200 req/dk) ve servis (100 req/dk) duzeyinde hiz sinirlamasi
+- **Full-Stack Monitoring**: Prometheus metrikleri, Grafana panolari, Elastic APM
+- **CI/CD Pipeline**: GitHub Actions ile otomatik test, build ve deploy

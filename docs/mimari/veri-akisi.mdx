@@ -1,0 +1,503 @@
+---
+title: "Veri Akisi"
+description: "Siparis olusturma, Saga deseni, olay yayilimi ve okuma/yazma ayirimi akislari"
+---
+
+# Veri Akisi
+
+Bu sayfa, sistemdeki tüm veri akis yollarini adim adim aciklamaktadir: siparis olusturma,
+checkout saga süreci, olay yayilimi, onbellek (cache) stratejisi ve okuma/yazma ayirimi
+(read/write splitting).
+
+---
+
+## Siparis Olusturma Akisi
+
+Bir siparisin olusturulmasindan tüm servislere yayilmasina kadar gecen sürecin adim adim aciklamasi:
+
+<Steps>
+  <Step title="Istemci Istegi">
+    Istemci, `POST /api/orders` endpoint'ine siparis verileriyle birlikte istek gonderir.
+    Istek API Gateway'e ulasir.
+  </Step>
+  <Step title="API Gateway Kontrolleri">
+    API Gateway sirasiyla: kimlik dogrulama (Better Auth), hiz sinirlandirma (200 req/min)
+    ve circuit breaker kontrollerini uygular. Tüm kontrollerden gecen istek Order Service'e
+    yonlendirilir.
+  </Step>
+  <Step title="Order Service Islemi">
+    Order Service, gelen istegi dogrular (validation). Yeni bir Order aggregate'i olusturur.
+    PostgreSQL Primary veritabanina kaydeder.
+  </Step>
+  <Step title="Onbellek Güncelleme">
+    Yeni siparis Redis onbellegine write-through (yazarak gecis) stratejisiyle kaydedilir.
+    Boylece sonraki okuma islemleri hizlanir.
+  </Step>
+  <Step title="Olay Yayinlama">
+    Order Service, `OrderCreatedEvent` olayini RabbitMQ'daki `orders.exchange` exchange'ine
+    `order.created` routing key'i ile yayinlar.
+  </Step>
+  <Step title="Paralel Olay Tüketimi">
+    Üc tuketici servis olaylari paralel olarak isler:
+    - **Notification Service:** Bildirim olusturur ve MongoDB'ye kaydeder
+    - **Inventory Service:** Redis'teki stok miktarini günceller
+    - **Search Service:** Elasticsearch indeksini günceller
+  </Step>
+  <Step title="Yanit">
+    Istemciye 201 Created yaniti doner. Asenkron islemler (bildirim, stok, indeks)
+    arka planda devam eder.
+  </Step>
+</Steps>
+
+---
+
+## Siparis Olusturma Sequence Diyagrami
+
+```mermaid
+sequenceDiagram
+    actor Client as Istemci
+    participant GW as API Gateway<br/>:3000
+    participant Auth as Better Auth
+    participant OS as Order Service<br/>:3001
+    participant PG as PostgreSQL<br/>Primary
+    participant RD as Redis Cache
+    participant RMQ as RabbitMQ
+    participant NS as Notification<br/>Service :3002
+    participant IS as Inventory<br/>Service :3003
+    participant SS as Search<br/>Service :3004
+    participant MG as MongoDB
+    participant ES as Elasticsearch
+
+    Client->>GW: POST /api/orders
+    GW->>Auth: Token dogrulama
+    Auth-->>GW: Dogrulanmis kullanici
+
+    Note over GW: Rate Limit kontrolü<br/>Circuit Breaker kontrolü
+
+    GW->>OS: POST /orders (proxy)
+    OS->>OS: Siparis dogrulama (validation)
+    OS->>PG: INSERT INTO orders
+    PG-->>OS: Siparis kaydi olusturuldu
+
+    OS->>RD: SET order:{id} (write-through)
+    RD-->>OS: OK
+
+    OS->>RMQ: publish("order.created")
+    OS-->>GW: 201 Created
+    GW-->>Client: 201 Created + Order JSON
+
+    par Paralel Olay Tüketimi
+        RMQ->>NS: order.created
+        NS->>MG: Bildirim kaydi olustur
+        NS->>NS: E-posta gonder
+    and
+        RMQ->>IS: order.created
+        IS->>RD: DECRBY stock:{productId}
+    and
+        RMQ->>SS: order.created
+        SS->>ES: Indeks dokümani ekle
+    end
+```
+
+---
+
+## Checkout Saga Akisi
+
+Checkout süreci, birden fazla servisi kapsayan dagilmis bir islemdir (distributed transaction).
+Bu projede **Saga Pattern** (Saga Deseni) kullanilarak yonetilir.
+
+<Note>
+  Saga, birden fazla yerel islemi (local transaction) sirali adimlar halinde yürüten ve
+  herhangi bir adim basarisiz oldugunda telafi islemleri (compensating transactions) ile
+  geri alan bir desendir.
+</Note>
+
+### Saga Adimlari
+
+```mermaid
+stateDiagram-v2
+    [*] --> StokKontrol: Checkout baslat
+
+    StokKontrol --> StokRezervasyon: Stok yeterli
+    StokKontrol --> SiparisIptal: Stok yetersiz
+
+    StokRezervasyon --> OdemeIslemi: Rezervasyon basarili
+    StokRezervasyon --> SiparisIptal: Rezervasyon basarisiz
+
+    OdemeIslemi --> SiparisTamamla: Odeme basarili
+    OdemeIslemi --> StokSerbest: Odeme basarisiz
+
+    StokSerbest --> SiparisIptal: Stok serbest birakildi
+    SiparisTamamla --> [*]: Siparis tamamlandi
+    SiparisIptal --> [*]: Siparis iptal edildi
+```
+
+### Adim Adim Saga Süreci
+
+<Tabs>
+  <Tab title="Basari Senaryosu">
+    <Steps>
+      <Step title="Stok Kontrolü">
+        Order Service, Inventory Service'e stok sorgulama istegi gonderir.
+        Inventory Service Redis'ten ilgili ürünlerin stok miktarini kontrol eder.
+        **Sonuc:** Stok yeterli.
+      </Step>
+      <Step title="Stok Rezervasyonu">
+        Inventory Service, istenen miktari stoktan düser ve bir rezervasyon kaydi olusturur.
+        Bu rezervasyon, odeme tamamlanana kadar gecerlidir.
+        **Sonuc:** Rezervasyon basarili.
+      </Step>
+      <Step title="Odeme Islemi">
+        Order Service, odeme islemini baslatir.
+        **Sonuc:** Odeme basarili.
+      </Step>
+      <Step title="Siparis Tamamlama">
+        Siparis durumu `completed` olarak güncellenir. `OrderUpdatedEvent` yayinlanir.
+        Bildirim servisi siparis onay bildirimi gonderir.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Basarisizlik Senaryosu (Rollback)">
+    <Steps>
+      <Step title="Stok Kontrolü">
+        Stok kontrolü basarili. Devam edilir.
+      </Step>
+      <Step title="Stok Rezervasyonu">
+        Rezervasyon basarili. Devam edilir.
+      </Step>
+      <Step title="Odeme Islemi Basarisiz">
+        Odeme reddedildi (yetersiz bakiye, kart hatasi vb.).
+        **Telafi islemi baslatilir.**
+      </Step>
+      <Step title="Stok Serbest Birakma (Compensating Transaction)">
+        Inventory Service'e stok serbest birakma komutu gonderilir.
+        Rezerve edilen miktar stoklara geri eklenir.
+      </Step>
+      <Step title="Siparis Iptal">
+        Siparis durumu `cancelled` olarak güncellenir. `OrderUpdatedEvent` yayinlanir.
+        Müsteriye iptal bildirimi gonderilir.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+<Warning>
+  Saga deseni, geleneksel veritabani transaction'larindan farkli olarak **eventual consistency**
+  (nihai tutarlilik) saglar. Bir adim ile sonraki adim arasinda kisa bir süre tutarsizlik
+  olabilir. Bu nedenle istemci tarafinda uygun bekleme ve yeniden deneme mekanizmalari
+  uygulanmalidir.
+</Warning>
+
+### Saga Sequence Diyagrami
+
+```mermaid
+sequenceDiagram
+    participant OS as Order Service
+    participant IS as Inventory Service
+    participant PS as Payment Service
+    participant RMQ as RabbitMQ
+
+    Note over OS: Checkout Saga baslar
+
+    OS->>IS: 1. Stok kontrolü
+    IS-->>OS: Stok yeterli
+
+    OS->>IS: 2. Stok rezervasyonu
+    IS-->>OS: Rezervasyon basarili
+
+    OS->>PS: 3. Odeme islemi
+
+    alt Odeme Basarili
+        PS-->>OS: Odeme onaylandi
+        OS->>OS: Siparis durumu: completed
+        OS->>RMQ: OrderUpdatedEvent (completed)
+    else Odeme Basarisiz
+        PS-->>OS: Odeme reddedildi
+        OS->>IS: 4. Stok serbest birak (rollback)
+        IS-->>OS: Stok serbest birakildi
+        OS->>OS: Siparis durumu: cancelled
+        OS->>RMQ: OrderUpdatedEvent (cancelled)
+    end
+```
+
+---
+
+## Olay Yayilim Akisi (Event Propagation)
+
+Order Service tarafindan yayinlanan olaylar, RabbitMQ Topic Exchange üzerinden üc farkli
+tuketici servise ulasir:
+
+```mermaid
+graph LR
+    subgraph "Üretici (Producer)"
+        OS[Order Service]
+    end
+
+    subgraph "RabbitMQ"
+        EX["orders.exchange"]
+        Q1["notification.orders"]
+        Q2["inventory.orders"]
+        Q3["search.orders"]
+        DLQ["orders.dlq"]
+    end
+
+    subgraph "Tuketiciler (Consumers)"
+        NS["Notification Service\n→ MongoDB'ye kaydet\n→ E-posta gonder"]
+        IS["Inventory Service\n→ Redis stok güncelle"]
+        SS["Search Service\n→ ES indeks güncelle"]
+    end
+
+    OS -->|"order.created\norder.updated"| EX
+    EX -->|"order.*"| Q1
+    EX -->|"order.*"| Q2
+    EX -->|"order.*"| Q3
+    Q1 --> NS
+    Q2 --> IS
+    Q3 --> SS
+
+    Q1 -.->|"3x basarisiz"| DLQ
+    Q2 -.->|"3x basarisiz"| DLQ
+    Q3 -.->|"3x basarisiz"| DLQ
+```
+
+### Her Tuketicinin Olay Isleme Detayi
+
+<CardGroup cols={3}>
+  <Card title="Notification Service" icon="bell">
+    **order.created** aldiginda:
+    - Yeni siparis bildirimi olusturur
+    - MongoDB'ye bildirim kaydini yazar
+    - E-posta gonderim kuygruguna ekler
+
+    **order.updated** aldiginda:
+    - Siparis durum degisikligi bildirimi olusturur
+    - Müsteriye güncelleme e-postasi gonderir
+  </Card>
+  <Card title="Inventory Service" icon="box">
+    **order.created** aldiginda:
+    - Siparis kalemlerini ayristir
+    - Her ürün icin `DECRBY` ile stok düser
+    - Stok esik degerinin altina düserse uyari olusturur
+
+    **order.updated** aldiginda:
+    - Siparis iptal edildiyse stok geri ekler
+    - `INCRBY` ile stok arttirir
+  </Card>
+  <Card title="Search Service" icon="magnifying-glass">
+    **order.created** aldiginda:
+    - Siparis verisini Elasticsearch'e indeksler
+    - Aranabilir alanlarini haritalar
+
+    **order.updated** aldiginda:
+    - Mevcut indeks dokümanini günceller
+    - Siparis durumunu indekste yansitir
+  </Card>
+</CardGroup>
+
+---
+
+## Onbellek (Cache) Stratejisi
+
+Bu projede **Write-Through Cache** (Yazarak Gecis Onbellek) stratejisi kullanilmaktadir.
+
+```mermaid
+sequenceDiagram
+    participant App as Order Service
+    participant Cache as Redis Cache
+    participant DB as PostgreSQL
+
+    Note over App,DB: Yazma Islemi (Write-Through)
+
+    App->>DB: 1. Veritabanina yaz
+    DB-->>App: Yazma basarili
+    App->>Cache: 2. Onbellegi güncelle
+    Cache-->>App: Güncelleme basarili
+    App-->>App: 3. Yanit don
+
+    Note over App,DB: Okuma Islemi (Cache-Aside)
+
+    App->>Cache: 1. Onbellekten oku
+    alt Cache Hit (Onbellekte bulundu)
+        Cache-->>App: Veri dondu
+    else Cache Miss (Onbellekte bulunamadi)
+        App->>DB: 2. Veritabanindan oku
+        DB-->>App: Veri dondu
+        App->>Cache: 3. Onbellege yaz
+        App-->>App: 4. Yanit don
+    end
+```
+
+<Tabs>
+  <Tab title="Write-Through (Yazma)">
+    Veri yazma islemlerinde, veri once veritabanina kaydedilir, ardindan onbellege de yazilir.
+    Bu sayede onbellek her zaman güncel kalir.
+
+    **Avantajlar:**
+    - Onbellek ve veritabani arasinda tutarlilik saglanir
+    - Okuma islemlerinde cache miss orani düsük kalir
+
+    **Dezavantajlar:**
+    - Yazma islemleri biraz daha yavas olur (iki yazma islemi)
+  </Tab>
+  <Tab title="Cache-Aside (Okuma)">
+    Veri okuma islemlerinde once onbellek kontrol edilir. Veri onbellekte varsa (cache hit)
+    dogrudan donulur. Yoksa (cache miss) veritabanindan okunup onbellege yazilir.
+
+    **Avantajlar:**
+    - Okuma islemleri cok hizlidir (Redis: 1ms altinda)
+    - Veritabani yükü azalir
+
+    **Dezavantajlar:**
+    - Ilk okumada cache miss yasanir
+  </Tab>
+</Tabs>
+
+---
+
+## Read/Write Splitting (Okuma/Yazma Ayirimi)
+
+PostgreSQL, **streaming replication** (akis tabanli coglama) ile primary-replica yapisinda
+calistirilmaktadir. Yazma islemleri primary'ye, okuma islemleri replica'ya yonlendirilir.
+
+```mermaid
+graph TB
+    OS[Order Service]
+
+    subgraph "PostgreSQL Cluster"
+        PG_P["PostgreSQL Primary\n:5432\n(Read + Write)"]
+        PG_R["PostgreSQL Replica\n:5433\n(Read Only)"]
+        PG_P -->|"Streaming\nReplication"| PG_R
+    end
+
+    OS -->|"INSERT, UPDATE, DELETE"| PG_P
+    OS -.->|"SELECT (yogun okuma)"| PG_R
+
+    style PG_P fill:#336791,color:#fff
+    style PG_R fill:#4a7fb5,color:#fff
+```
+
+### Nasil Calisir?
+
+<Steps>
+  <Step title="Yazma Islemleri (Write)">
+    `INSERT`, `UPDATE`, `DELETE` sorgulari her zaman **PostgreSQL Primary** (port 5432)
+    üzerinde calistirilir. Drizzle ORM, yazma islemleri icin primary baglantisini kullanir.
+  </Step>
+  <Step title="Coglama (Replication)">
+    Primary veritabanindaki degisiklikler, **streaming replication** ile replica'ya
+    neredeyse anlik olarak kopyalanir (asenkron, tipik gecikme 100ms altinda).
+  </Step>
+  <Step title="Okuma Islemleri (Read)">
+    `SELECT` sorgulari **PostgreSQL Replica** (port 5433) üzerine yonlendirilir.
+    Bu sayede primary veritabaninin yükü azalir ve okuma kapasitesi artar.
+  </Step>
+</Steps>
+
+<CodeGroup>
+```typescript Drizzle ORM - Read/Write Splitting
+import { drizzle } from "drizzle-orm/node-postgres";
+
+// Yazma baglantisi (Primary)
+const primaryDb = drizzle({
+  connection: "postgres://user:pass@postgres-primary:5432/ecommerce",
+});
+
+// Okuma baglantisi (Replica)
+const replicaDb = drizzle({
+  connection: "postgres://user:pass@postgres-replica:5433/ecommerce",
+});
+
+// Yazma islemi - Primary kullanir
+async function createOrder(order: NewOrder) {
+  return primaryDb.insert(orders).values(order).returning();
+}
+
+// Okuma islemi - Replica kullanir
+async function getOrders() {
+  return replicaDb.select().from(orders);
+}
+```
+</CodeGroup>
+
+<Tip>
+  Read/Write Splitting, okuma yogun (read-heavy) uygulamalarda önemli performans kazanici
+  saglar. E-ticaret uygulamalarinda okuma/yazma orani tipik olarak 80/20'dir; yani her
+  5 islemden 4'ü okuma islemidir. Replica sayisi arttirilarak okuma kapasitesi yatay
+  olarak olceklenebilir.
+</Tip>
+
+---
+
+## Tam Veri Akis Ozeti
+
+Asagidaki diyagram, bir siparisin olusturulmasindan tüm yan etkilerin tamamlanmasina
+kadar gecen tam veri akisini gostermektedir:
+
+```mermaid
+sequenceDiagram
+    actor C as Istemci
+    participant GW as API Gateway
+    participant OS as Order Service
+    participant PG as PG Primary
+    participant PGR as PG Replica
+    participant RD as Redis
+    participant RMQ as RabbitMQ
+    participant NS as Notification Svc
+    participant IS as Inventory Svc
+    participant SS as Search Svc
+    participant MG as MongoDB
+    participant ES as Elasticsearch
+
+    C->>GW: POST /api/orders
+    Note over GW: Auth + Rate Limit + CB
+
+    GW->>OS: Proxy istek
+
+    rect rgb(230, 245, 255)
+        Note over OS,RD: Write-Through Cache + DB Yazma
+        OS->>PG: INSERT siparis (Primary)
+        PG-->>OS: Siparis olusturuldu
+        PG->>PGR: Streaming Replication
+        OS->>RD: Cache güncelle
+    end
+
+    OS->>RMQ: OrderCreatedEvent yayinla
+    OS-->>GW: 201 Created
+    GW-->>C: 201 Created
+
+    rect rgb(255, 245, 230)
+        Note over RMQ,ES: Asenkron Olay Tüketimi
+        par
+            RMQ->>NS: order.created
+            NS->>MG: Bildirim kaydet
+        and
+            RMQ->>IS: order.created
+            IS->>RD: Stok düs (DECRBY)
+        and
+            RMQ->>SS: order.created
+            SS->>ES: Indeks güncelle
+        end
+    end
+
+    Note over C,ES: Sonraki okuma islemleri
+    C->>GW: GET /api/orders/:id
+    GW->>OS: Proxy istek
+    OS->>RD: Cache kontrol
+
+    alt Cache Hit
+        RD-->>OS: Veri dondu
+    else Cache Miss
+        OS->>PGR: SELECT (Replica)
+        PGR-->>OS: Veri dondu
+        OS->>RD: Cache'e yaz
+    end
+
+    OS-->>GW: 200 OK
+    GW-->>C: 200 OK + Order JSON
+```
+
+<Note>
+  Senkron islemler (mavi alan) istemcinin yanit bekledigi süredir. Asenkron islemler
+  (turuncu alan) istemciden bagimsiz olarak arka planda gerceklesir. Bu ayrim sayesinde
+  istemci hizli yanit alir, yan etkiler ise güvenilir bir sekilde tamamlanir.
+</Note>

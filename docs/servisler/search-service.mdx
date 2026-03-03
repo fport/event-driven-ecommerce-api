@@ -1,0 +1,308 @@
+---
+title: "Search Service"
+description: "Elasticsearch tabanli full-text search ve aggregation servisi. RabbitMQ consumer ile siparisleri otomatik indeksler."
+---
+
+# Search Service
+
+Search Service, siparis verilerini Elasticsearch'te indeksleyerek full-text search (tam metin arama) ve aggregation (veri toplama/istatistik) islemleri sunar. RabbitMQ consumer olarak siparis olaylarini dinler ve otomatik olarak indeksler.
+
+**Port:** 3004
+**Veritabani:** Elasticsearch
+**Framework:** Hono.dev
+
+## Mimari Genel Bakis
+
+```mermaid
+graph LR
+    OS[Order Service]
+    OS -->|order.created / order.updated| RMQ[RabbitMQ]
+    RMQ -->|search.orders kuyrugu| SS[Search Service]
+    SS -->|Indeksle| ES[(Elasticsearch)]
+
+    CLIENT[Istemci] --> GW[API Gateway]
+    GW -->|GET /api/search| SS
+    SS -->|Sorgula| ES
+```
+
+## Elasticsearch Index Mapping
+
+Siparis verileri `orders` index'inde saklanir. Index olusturma islemi uygulama baslatildiginda otomatik olarak gerceklestirilir:
+
+```typescript
+// services/search-service/src/elastic.ts
+await client.indices.create({
+  index: "orders",
+  body: {
+    mappings: {
+      properties: {
+        id:            { type: "keyword" },
+        customerName:  { type: "text" },
+        customerEmail: { type: "keyword" },
+        items: {
+          type: "nested",
+          properties: {
+            productId: { type: "keyword" },
+            name:      { type: "text" },
+            quantity:  { type: "integer" },
+            price:     { type: "float" },
+          },
+        },
+        totalAmount: { type: "float" },
+        status:      { type: "keyword" },
+        createdAt:   { type: "date" },
+        updatedAt:   { type: "date" },
+      },
+    },
+  },
+});
+```
+
+### Alan Tipleri Aciklamasi
+
+| Alan              | ES Tipi    | Aciklama                                             |
+|-------------------|------------|------------------------------------------------------|
+| `id`              | `keyword`  | Tam eslesme ile aranir, analiz edilmez               |
+| `customerName`    | `text`     | Full-text arama destekli, tokenize edilir            |
+| `customerEmail`   | `keyword`  | Tam eslesme ile aranir                               |
+| `items`           | `nested`   | Her siparis kalemi ayri belge olarak indekslenir     |
+| `items.productId` | `keyword`  | Urun ID, tam eslesme                                |
+| `items.name`      | `text`     | Urun adi, full-text arama destekli                  |
+| `items.quantity`  | `integer`  | Miktar                                               |
+| `items.price`     | `float`    | Birim fiyat                                          |
+| `totalAmount`     | `float`    | Toplam siparis tutari                                |
+| `status`          | `keyword`  | Siparis durumu (filtreleme icin)                     |
+| `createdAt`       | `date`     | Olusturma tarihi (zaman bazli sorgular icin)        |
+| `updatedAt`       | `date`     | Guncelleme tarihi                                    |
+
+<Note>
+  `items` alani `nested` tip olarak tanimlanmistir. Bu, her siparis kaleminin bagimsiz olarak sorgulanabilmesini saglar. Normal `object` tip kullanirsaniz, farkli kalemlerin alanlari arasinda yanlis eslesmeler olusabilir.
+</Note>
+
+## API Endpoint'leri
+
+### Full-Text Arama
+
+<CodeGroup>
+```bash Temel Arama
+curl "http://localhost:3004/search?q=laptop"
+```
+
+```bash Durum Filtresi ile
+curl "http://localhost:3004/search?q=laptop&status=pending"
+```
+
+```bash Sayfalama ile
+curl "http://localhost:3004/search?q=laptop&from=20&size=10"
+```
+
+```json Yanit
+{
+  "success": true,
+  "data": {
+    "total": 42,
+    "hits": [
+      {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "customerName": "Ahmet Yilmaz",
+        "customerEmail": "ahmet@example.com",
+        "items": [
+          { "productId": "p1", "name": "Laptop", "quantity": 1, "price": 15000 }
+        ],
+        "totalAmount": 15000,
+        "status": "pending",
+        "createdAt": "2026-03-03T10:00:00.000Z"
+      }
+    ]
+  }
+}
+```
+</CodeGroup>
+
+#### Sorgu Parametreleri
+
+| Parametre | Tip    | Varsayilan | Aciklama                                  |
+|-----------|--------|------------|-------------------------------------------|
+| `q`       | string | -          | Arama metni (customerName, customerEmail, items.name uzerinde) |
+| `status`  | string | -          | Siparis durumu filtresi (tam eslesme)     |
+| `from`    | number | 0          | Sayfalama baslangic noktasi               |
+| `size`    | number | 20         | Sayfa basina sonuc sayisi                 |
+
+### Arama Mekanizmasi
+
+Arama, `multi_match` sorgusu ile birden fazla alan uzerinde gerceklestirilir:
+
+```typescript
+// services/search-service/src/elastic.ts
+if (q) {
+  must.push({
+    multi_match: {
+      query: q,
+      fields: ["customerName", "customerEmail", "items.name"],
+      type: "best_fields",
+      fuzziness: "AUTO",
+    },
+  });
+}
+
+if (status) {
+  must.push({ term: { status } });
+}
+
+// Filtre yoksa tum sonuclari getir
+const query = must.length > 0 ? { bool: { must } } : { match_all: {} };
+```
+
+<Tip>
+  `fuzziness: "AUTO"` parametresi, kucuk yazim hatalarini otomatik olarak tolere eder. Ornegin, "laptp" aramasinda "laptop" sonuclari da donebilir. Elasticsearch, kelime uzunluguna gore uygun fuzziness degerini otomatik belirler.
+</Tip>
+
+Sonuclar `createdAt` alanina gore azalan sirada (en yeni basta) siralanir.
+
+### Istatistikler (Aggregations)
+
+<CodeGroup>
+```bash Istek
+curl http://localhost:3004/search/stats
+```
+
+```json Yanit
+{
+  "success": true,
+  "data": {
+    "status_counts": {
+      "buckets": [
+        { "key": "pending", "doc_count": 15 },
+        { "key": "confirmed", "doc_count": 8 },
+        { "key": "shipped", "doc_count": 12 },
+        { "key": "delivered", "doc_count": 25 }
+      ]
+    },
+    "total_revenue": {
+      "value": 450000.0
+    },
+    "avg_order_value": {
+      "value": 7500.0
+    },
+    "orders_over_time": {
+      "buckets": [
+        { "key_as_string": "2026-03-01", "doc_count": 5 },
+        { "key_as_string": "2026-03-02", "doc_count": 8 },
+        { "key_as_string": "2026-03-03", "doc_count": 3 }
+      ]
+    }
+  }
+}
+```
+</CodeGroup>
+
+#### Aggregation Detaylari
+
+```typescript
+// services/search-service/src/elastic.ts
+const result = await client.search({
+  index: "orders",
+  body: {
+    size: 0,  // Belge dondurmeden sadece aggregation sonuclari
+    aggs: {
+      status_counts: {
+        terms: { field: "status" },
+      },
+      total_revenue: {
+        sum: { field: "totalAmount" },
+      },
+      avg_order_value: {
+        avg: { field: "totalAmount" },
+      },
+      orders_over_time: {
+        date_histogram: {
+          field: "createdAt",
+          calendar_interval: "day",
+        },
+      },
+    },
+  },
+});
+```
+
+| Aggregation         | Tip              | Aciklama                                    |
+|---------------------|------------------|---------------------------------------------|
+| `status_counts`     | `terms`          | Duruma gore siparis sayisi dagilimi          |
+| `total_revenue`     | `sum`            | Toplam gelir (tum siparislerin toplam tutari)|
+| `avg_order_value`   | `avg`            | Ortalama siparis degeri                      |
+| `orders_over_time`  | `date_histogram` | Gune gore siparis sayisi (zaman serisi)      |
+
+## RabbitMQ Consumer
+
+Search Service, siparis olaylarini dinleyerek Elasticsearch'e otomatik olarak indeksler:
+
+```typescript
+// services/search-service/src/consumer.ts
+
+// Her iki olay turunu de dinle
+await channel.bindQueue(
+  QUEUES.SEARCH_ORDERS,
+  EXCHANGES.ORDERS,
+  ROUTING_KEYS.ORDER_CREATED  // "order.created"
+);
+await channel.bindQueue(
+  QUEUES.SEARCH_ORDERS,
+  EXCHANGES.ORDERS,
+  ROUTING_KEYS.ORDER_UPDATED  // "order.updated"
+);
+
+channel.consume(QUEUES.SEARCH_ORDERS, async (msg) => {
+  const event: OrderEvent = JSON.parse(msg.content.toString());
+  await indexOrder(event.data);
+  channel.ack(msg);
+});
+```
+
+### Indeksleme Fonksiyonu
+
+```typescript
+// services/search-service/src/elastic.ts
+export async function indexOrder(order: Order): Promise<void> {
+  await client.index({
+    index: "orders",
+    id: order.id,   // Ayni ID ile guncelleme yapar (upsert)
+    document: order,
+  });
+}
+```
+
+<Tip>
+  `id: order.id` parametresi sayesinde, ayni siparisi birden fazla kez indekslemek mevcut belgeyi gunceller. Bu, hem `order.created` hem de `order.updated` olaylarinin guvenle islenmesini saglar.
+</Tip>
+
+| Parametre       | Deger                      |
+|-----------------|----------------------------|
+| Kuyruk          | `search.orders`            |
+| Routing key'ler | `order.created`, `order.updated` |
+| DLX             | `orders.exchange.dlx`      |
+| Maksimum deneme | 3                          |
+| Prefetch        | 10                         |
+
+## Elasticsearch Baglanti Yapilandirmasi
+
+```typescript
+// services/search-service/src/elastic.ts
+import { Client } from "@elastic/elasticsearch";
+import { HttpConnection } from "@elastic/transport";
+
+const client = new Client({
+  node: process.env.ELASTICSEARCH_URL || "http://localhost:9200",
+  Connection: HttpConnection,
+});
+```
+
+Index olusturma islemi uygulama basladiginda 10 denemeye kadar yeniden denenir (her deneme arasinda 3 saniye beklenir). Bu, Docker Compose ortaminda Elasticsearch'un hazir olmasini beklemek icin kullanilir.
+
+## Ortam Degiskenleri
+
+| Degisken              | Varsayilan                          | Aciklama                    |
+|-----------------------|-------------------------------------|-----------------------------|
+| `ELASTICSEARCH_URL`   | `http://localhost:9200`             | Elasticsearch adresi        |
+| `RABBITMQ_URL`        | `amqp://guest:guest@localhost:5672` | RabbitMQ baglanti adresi    |
+| `APM_SERVICE_NAME`    | `unknown`                           | APM servis adi              |
+| `APM_SERVER_URL`      | -                                   | APM sunucu adresi           |
