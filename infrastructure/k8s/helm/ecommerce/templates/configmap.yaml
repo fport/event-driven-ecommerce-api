@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ecommerce-config
+  namespace: {{ .Values.global.namespace }}
+data:
+  NODE_ENV: {{ .Values.config.nodeEnv | quote }}
+  RABBITMQ_URL: {{ .Values.config.rabbitmqUrl | quote }}
+  REDIS_URL: {{ .Values.config.redisUrl | quote }}
+  DATABASE_URL: {{ .Values.config.databaseUrl | quote }}
+  MONGODB_URL: {{ .Values.config.mongodbUrl | quote }}
+  ELASTICSEARCH_URL: {{ .Values.config.elasticsearchUrl | quote }}
+  APM_SERVER_URL: {{ .Values.config.apmServerUrl | quote }}
+  ORDER_SERVICE_URL: "http://order-service:{{ .Values.services.orderService.port }}"
+  NOTIFICATION_SERVICE_URL: "http://notification-service:{{ .Values.services.notificationService.port }}"
+  INVENTORY_SERVICE_URL: "http://inventory-service:{{ .Values.services.inventoryService.port }}"
+  SEARCH_SERVICE_URL: "http://search-service:{{ .Values.services.searchService.port }}"

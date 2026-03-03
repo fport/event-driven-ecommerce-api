@@ -1,4 +1,31 @@
 services:
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile.dev
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=development
+      - ORDER_SERVICE_URL=http://order-service:3001
+      - NOTIFICATION_SERVICE_URL=http://notification-service:3002
+      - INVENTORY_SERVICE_URL=http://inventory-service:3003
+      - SEARCH_SERVICE_URL=http://search-service:3004
+      - APM_SERVER_URL=http://apm-server:8200
+      - APM_SERVICE_NAME=api-gateway
+      - AUTH_SECRET=dev-secret-change-in-production
+      - BASE_URL=http://localhost:3000
+    volumes:
+      - ./services/api-gateway/src:/app/services/api-gateway/src
+      - ./packages/shared/src:/app/packages/shared/src
+    depends_on:
+      - order-service
+      - notification-service
+      - inventory-service
+      - search-service
+    restart: unless-stopped
+
   order-service:
     build:
       context: .
@@ -11,6 +38,8 @@ services:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/orders
       - REDIS_URL=redis://redis:6379
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - APM_SERVER_URL=http://apm-server:8200
+      - APM_SERVICE_NAME=order-service
     volumes:
       - ./services/order-service/src:/app/services/order-service/src
       - ./services/order-service/drizzle:/app/services/order-service/drizzle
@@ -35,6 +64,8 @@ services:
       - NODE_ENV=development
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
       - MONGODB_URL=mongodb://mongo:27017/notifications
+      - APM_SERVER_URL=http://apm-server:8200
+      - APM_SERVICE_NAME=notification-service
     volumes:
       - ./services/notification-service/src:/app/services/notification-service/src
       - ./packages/shared/src:/app/packages/shared/src
@@ -56,6 +87,8 @@ services:
       - NODE_ENV=development
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
       - REDIS_URL=redis://redis:6379
+      - APM_SERVER_URL=http://apm-server:8200
+      - APM_SERVICE_NAME=inventory-service
     volumes:
       - ./services/inventory-service/src:/app/services/inventory-service/src
       - ./packages/shared/src:/app/packages/shared/src
@@ -63,6 +96,29 @@ services:
       rabbitmq:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  search-service:
+    build:
+      context: .
+      dockerfile: services/search-service/Dockerfile.dev
+    ports:
+      - "3004:3004"
+    environment:
+      - PORT=3004
+      - NODE_ENV=development
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - APM_SERVER_URL=http://apm-server:8200
+      - APM_SERVICE_NAME=search-service
+    volumes:
+      - ./services/search-service/src:/app/services/search-service/src
+      - ./packages/shared/src:/app/packages/shared/src
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      elasticsearch:
         condition: service_healthy
     restart: unless-stopped
 
@@ -102,26 +158,20 @@ services:
       timeout: 3s
       retries: 5
 
-  search-service:
-    build:
-      context: .
-      dockerfile: services/search-service/Dockerfile.dev
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
     ports:
-      - "3004:3004"
+      - "5672:5672"
+      - "15672:15672"
     environment:
-      - PORT=3004
-      - NODE_ENV=development
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
-      - ELASTICSEARCH_URL=http://elasticsearch:9200
-    volumes:
-      - ./services/search-service/src:/app/services/search-service/src
-      - ./packages/shared/src:/app/packages/shared/src
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
-    restart: unless-stopped
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
@@ -150,20 +200,19 @@ services:
       elasticsearch:
         condition: service_healthy
 
-  rabbitmq:
-    image: rabbitmq:3-management-alpine
+  apm-server:
+    image: docker.elastic.co/apm/apm-server:8.17.0
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "8200:8200"
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
+      - output.elasticsearch.hosts=["http://elasticsearch:9200"]
+      - apm-server.host=0.0.0.0:8200
+      - apm-server.rum.enabled=true
+      - setup.kibana.host=kibana:5601
+      - xpack.security.enabled=false
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
 
 volumes:
   postgres_data:

@@ -2,5 +2,8 @@
   "name": "@ecommerce/shared",
   "version": "1.0.0",
   "main": "src/index.ts",
-  "types": "src/index.ts"
+  "types": "src/index.ts",
+  "peerDependencies": {
+    "hono": "^4.7.0"
+  }
 }

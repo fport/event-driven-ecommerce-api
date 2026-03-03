@@ -1,0 +1,63 @@
+global:
+  imageRegistry: ecommerce
+  imageTag: latest
+  namespace: ecommerce-dev
+
+services:
+  apiGateway:
+    replicas: 2
+    port: 3000
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 256Mi }
+
+  orderService:
+    replicas: 2
+    port: 3001
+    hpa:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      cpuUtilization: 70
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 256Mi }
+
+  notificationService:
+    replicas: 1
+    port: 3002
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 250m, memory: 256Mi }
+
+  inventoryService:
+    replicas: 1
+    port: 3003
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 250m, memory: 256Mi }
+
+  searchService:
+    replicas: 1
+    port: 3004
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 250m, memory: 256Mi }
+
+ingress:
+  enabled: true
+  host: ecommerce.local
+  className: nginx
+
+config:
+  nodeEnv: production
+  rabbitmqUrl: amqp://guest:guest@rabbitmq:5672
+  redisUrl: redis://redis:6379
+  databaseUrl: postgres://postgres:postgres@postgres:5432/orders
+  mongodbUrl: mongodb://mongo:27017/notifications
+  elasticsearchUrl: http://elasticsearch:9200
+  apmServerUrl: http://apm-server:8200
+
+secrets:
+  postgresPassword: postgres
+  authSecret: super-secret-key-change-in-production

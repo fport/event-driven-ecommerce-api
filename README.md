@@ -227,7 +227,7 @@ bun run db:studio    # Open Drizzle Studio GUI
 | 2 | PostgreSQL + Redis | Drizzle ORM, caching, rate limiting | Done |
 | 3 | RabbitMQ Events | Notification & Inventory service, DLX/DLQ | Done |
 | 4 | ElasticSearch | Search Service, full-text search | Done |
-| 5 | Monitoring | Elastic APM + Kibana | - |
-| 6 | API Gateway | Auth (Better Auth), routing, rate limiting | - |
-| 7 | Kubernetes | K8s deployment, scaling | - |
-| 8 | Terraform | Infrastructure as Code | - |
+| 5 | Monitoring | Elastic APM + Kibana | Done |
+| 6 | API Gateway | Auth (Better Auth), routing, circuit breaker | Done |
+| 7 | Kubernetes | K8s deployment, Helm, HPA, Ingress | Done |
+| 8 | Terraform + CI/CD | IaC, GitHub Actions pipeline | Done |

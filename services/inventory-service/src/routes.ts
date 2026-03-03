@@ -1,8 +1,11 @@
 import { Hono } from "hono";
 import { z } from "zod";
+import { apmMiddleware } from "@ecommerce/shared";
 import { inventoryDb } from "./db";
 
 const app = new Hono();
+
+app.use("*", apmMiddleware());
 
 const productSchema = z.object({
   id: z.string().min(1),

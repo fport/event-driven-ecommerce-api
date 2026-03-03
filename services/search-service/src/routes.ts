@@ -1,7 +1,10 @@
 import { Hono } from "hono";
+import { apmMiddleware } from "@ecommerce/shared";
 import { searchOrders, getStats } from "./elastic";
 
 const app = new Hono();
+
+app.use("*", apmMiddleware());
 
 app.get("/health", (c) => {
   return c.json({

@@ -1,0 +1,15 @@
+FROM oven/bun:1
+WORKDIR /app
+
+COPY package.json bun.lock* ./
+COPY packages/shared/package.json ./packages/shared/
+COPY services/api-gateway/package.json ./services/api-gateway/
+RUN bun install --frozen-lockfile 2>/dev/null || bun install
+
+COPY packages/shared ./packages/shared
+COPY services/api-gateway ./services/api-gateway
+
+WORKDIR /app/services/api-gateway
+EXPOSE 3000
+
+CMD ["bun", "run", "--watch", "src/index.ts"]

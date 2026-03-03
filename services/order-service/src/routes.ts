@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Order, ApiResponse } from "@ecommerce/shared";
+import { apmMiddleware, logger } from "@ecommerce/shared";
 import { store } from "./store";
 import { cache } from "./cache";
 import { createOrderSchema, updateOrderSchema } from "./validation";
@@ -7,6 +8,9 @@ import { rateLimiter } from "./middleware/rate-limit";
 import { publishOrderCreated, publishOrderUpdated } from "./events/producer";
 
 const app = new Hono();
+
+// APM + tracing
+app.use("*", apmMiddleware());
 
 // Rate limiting (applied to all routes except health)
 app.use("/orders/*", rateLimiter);
