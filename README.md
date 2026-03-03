@@ -12,7 +12,9 @@ graph TB
     Client -->|HTTP| NS_API[Notification Service :3002]
     Client -->|HTTP| IS_API[Inventory Service :3003]
 
-    OS -->|Read/Write| PG[(PostgreSQL)]
+    OS -->|Write| PG[(PostgreSQL Primary)]
+    OS -->|Read| PG_R[(PostgreSQL Replica)]
+    PG -->|Streaming Replication| PG_R
     OS -->|Cache| RD[(Redis)]
     OS -->|Publish Event| RMQ[[RabbitMQ\norders.exchange\ntopic]]
 
@@ -43,7 +45,8 @@ graph TB
 sequenceDiagram
     participant C as Client
     participant OS as Order Service
-    participant PG as PostgreSQL
+    participant PG as PostgreSQL Primary
+    participant PG_R as PostgreSQL Replica
     participant RD as Redis
     participant RMQ as RabbitMQ
     participant NS as Notification Service
@@ -73,7 +76,7 @@ sequenceDiagram
 - **Runtime:** Bun
 - **Framework:** Hono.dev
 - **Message Broker:** RabbitMQ
-- **Databases:** PostgreSQL, MongoDB, Redis, ElasticSearch
+- **Databases:** PostgreSQL (Primary/Replica), MongoDB, Redis, ElasticSearch
 - **Monitoring:** Elastic APM + Kibana
 - **Container:** Docker + Kubernetes
 - **IaC:** Terraform
@@ -175,11 +178,15 @@ curl "http://localhost:3004/search/stats"
 
 ## Infrastructure
 
-### PostgreSQL
-- **Port:** 5432
+### PostgreSQL (Primary / Replica)
+- **Primary Port:** 5432
+- **Replica Port:** 5433
 - **Credentials:** postgres / postgres
 - **Database:** orders
-- Connect: `psql -h localhost -U postgres -d orders`
+- **Replication User:** replicator / replicator_pass
+- Connect primary: `psql -h localhost -p 5432 -U postgres -d orders`
+- Connect replica: `psql -h localhost -p 5433 -U postgres -d orders`
+- Verify replica: `psql -h localhost -p 5433 -U postgres -d orders -c "SELECT pg_is_in_recovery();"` → `t`
 
 ### Redis
 - **Port:** 6379
@@ -214,6 +221,7 @@ curl "http://localhost:3004/search/stats"
 
 ## Features
 
+- **Read/Write Splitting:** PostgreSQL streaming replication (writes → primary, reads → replica)
 - **Caching:** Redis write-through cache on orders (5 min TTL)
 - **Rate Limiting:** 200 req/min at gateway, 100 req/min at service level
 - **Migrations:** Auto-run on startup via Drizzle ORM

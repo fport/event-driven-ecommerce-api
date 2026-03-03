@@ -1,0 +1,4 @@
+- [ ] ddd
+- [ ] replica db 
+- [ ] apigateway ve deployment stratejisi
+- [ ] yaptıklarını anlatan bir uzun docs. bunun içinde bir lib kullanabiliriz döküman çıkarması için

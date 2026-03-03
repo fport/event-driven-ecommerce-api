@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { Order } from "@ecommerce/shared";
-import { db } from "./db";
+import { db, readDb } from "./db";
 import { orders } from "./db/schema";
 
 function rowToOrder(row: typeof orders.$inferSelect): Order {
@@ -18,12 +18,12 @@ function rowToOrder(row: typeof orders.$inferSelect): Order {
 
 export const store = {
   async getAll(): Promise<Order[]> {
-    const rows = await db.select().from(orders);
+    const rows = await readDb.select().from(orders);
     return rows.map(rowToOrder);
   },
 
   async getById(id: string): Promise<Order | undefined> {
-    const [row] = await db.select().from(orders).where(eq(orders.id, id));
+    const [row] = await readDb.select().from(orders).where(eq(orders.id, id));
     return row ? rowToOrder(row) : undefined;
   },
 

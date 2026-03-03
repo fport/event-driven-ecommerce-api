@@ -44,12 +44,15 @@ services:
       - PORT=3001
       - NODE_ENV=production
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/orders
+      - DATABASE_REPLICA_URL=postgres://postgres:postgres@postgres-replica:5432/orders
       - REDIS_URL=redis://redis:6379
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
       - APM_SERVER_URL=http://apm-server:8200
       - APM_SERVICE_NAME=order-service
     depends_on:
       postgres:
+        condition: service_healthy
+      postgres-replica:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -149,13 +152,41 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: orders
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=3
+      -c max_replication_slots=1
+      -c hot_standby=on
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/docker/postgres/init-replication.sh:/docker-entrypoint-initdb.d/init-replication.sh
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 3s
       retries: 5
+
+  postgres-replica:
+    image: postgres:17-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      PGUSER: replicator
+      PGPASSWORD: replicator_pass
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+      - ./infrastructure/docker/postgres/start-replica.sh:/start-replica.sh
+    entrypoint: /start-replica.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
 
   redis:
     image: redis:7-alpine
@@ -267,6 +298,7 @@ services:
 
 volumes:
   postgres_data:
+  postgres_replica_data:
   redis_data:
   mongo_data:
   rabbitmq_data:
