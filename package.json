@@ -1,0 +1,8 @@
+{
+  "name": "event-driven-project",
+  "private": true,
+  "workspaces": [
+    "services/*",
+    "packages/*"
+  ]
+}
