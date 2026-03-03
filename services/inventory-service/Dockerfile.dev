@@ -1,0 +1,15 @@
+FROM oven/bun:1
+WORKDIR /app
+
+COPY package.json bun.lock* ./
+COPY packages/shared/package.json ./packages/shared/
+COPY services/inventory-service/package.json ./services/inventory-service/
+RUN bun install --frozen-lockfile 2>/dev/null || bun install
+
+COPY packages/shared ./packages/shared
+COPY services/inventory-service ./services/inventory-service
+
+WORKDIR /app/services/inventory-service
+EXPOSE 3003
+
+CMD ["bun", "run", "--watch", "src/index.ts"]

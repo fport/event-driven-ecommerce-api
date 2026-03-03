@@ -5,4 +5,10 @@ export type {
   CreateOrderInput,
   UpdateOrderInput,
   ApiResponse,
+  BaseEvent,
+  OrderCreatedEvent,
+  OrderUpdatedEvent,
+  OrderEvent,
 } from "./types";
+
+export { EXCHANGES, ROUTING_KEYS, QUEUES } from "./types";

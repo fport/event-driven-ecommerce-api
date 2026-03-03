@@ -1,0 +1,15 @@
+FROM oven/bun:1
+WORKDIR /app
+
+COPY package.json bun.lock* ./
+COPY packages/shared/package.json ./packages/shared/
+COPY services/notification-service/package.json ./services/notification-service/
+RUN bun install --frozen-lockfile 2>/dev/null || bun install
+
+COPY packages/shared ./packages/shared
+COPY services/notification-service ./services/notification-service
+
+WORKDIR /app/services/notification-service
+EXPOSE 3002
+
+CMD ["bun", "run", "--watch", "src/index.ts"]

@@ -4,6 +4,7 @@ import { store } from "./store";
 import { cache } from "./cache";
 import { createOrderSchema, updateOrderSchema } from "./validation";
 import { rateLimiter } from "./middleware/rate-limit";
+import { publishOrderCreated, publishOrderUpdated } from "./events/producer";
 
 const app = new Hono();
 
@@ -68,6 +69,7 @@ app.post("/orders", async (c) => {
 
   const created = await store.create({ customerName, customerEmail, items, totalAmount });
   await cache.setOrder(created);
+  publishOrderCreated(created);
   return c.json<ApiResponse<Order>>({ success: true, data: created }, 201);
 });
 
@@ -89,6 +91,7 @@ app.patch("/orders/:id", async (c) => {
   }
 
   await cache.setOrder(updated);
+  publishOrderUpdated(updated);
   return c.json<ApiResponse<Order>>({ success: true, data: updated });
 });
 
