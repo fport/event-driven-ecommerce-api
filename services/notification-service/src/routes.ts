@@ -1,10 +1,13 @@
 import { Hono } from "hono";
-import { apmMiddleware } from "@ecommerce/shared";
+import { apmMiddleware, metricsMiddleware, getPrometheusMetrics } from "@ecommerce/shared";
 import { getNotificationsCollection } from "./db";
 
 const app = new Hono();
 
 app.use("*", apmMiddleware());
+app.use("*", metricsMiddleware());
+
+app.get("/metrics", (c) => c.text(getPrometheusMetrics("notification-service")));
 
 app.get("/health", (c) => {
   return c.json({

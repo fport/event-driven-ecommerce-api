@@ -1,6 +1,11 @@
 {
   "name": "event-driven-project",
   "private": true,
+  "scripts": {
+    "test": "bun test --recursive",
+    "test:unit": "bun test --recursive services/*/src/__tests__ packages/*/src/__tests__",
+    "test:e2e": "bun run tests/e2e.ts"
+  },
   "workspaces": [
     "services/*",
     "packages/*"

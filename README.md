@@ -203,12 +203,36 @@ curl "http://localhost:3004/search/stats"
 - **Port:** 5601
 - **Dashboard:** http://localhost:5601
 
+### Prometheus
+- **Port:** 9090
+- **Targets:** http://localhost:9090/targets
+
+### Grafana
+- **Port:** 3100
+- **Credentials:** admin / admin
+- **Dashboard:** http://localhost:3100
+
 ## Features
 
 - **Caching:** Redis write-through cache on orders (5 min TTL)
-- **Rate Limiting:** 100 requests/min per IP via Redis sliding window
+- **Rate Limiting:** 200 req/min at gateway, 100 req/min at service level
 - **Migrations:** Auto-run on startup via Drizzle ORM
 - **Validation:** Zod schema validation on all inputs
+- **Saga Pattern:** Checkout flow (stock check -> reserve -> payment -> confirm, with rollback)
+- **Circuit Breaker:** Per-service breaker in api-gateway (5 failures -> open -> 30s reset)
+- **Auth:** Better Auth (email/password + GitHub + Google OAuth)
+- **Metrics:** Prometheus `/metrics` endpoint on all services
+- **Dashboards:** Grafana (request rates, errors, latency, uptime)
+
+## Testing
+
+```bash
+# Unit tests
+bun test --recursive
+
+# E2E tests (requires services running)
+bun run test:e2e
+```
 
 ## Database Migrations
 
@@ -217,6 +241,20 @@ cd services/order-service
 bun run db:generate  # Generate migration from schema changes
 bun run db:migrate   # Run migrations
 bun run db:studio    # Open Drizzle Studio GUI
+```
+
+## Checkout (Saga) Flow
+
+```bash
+# 1. Add stock
+curl -X POST http://localhost:3003/products \
+  -H "Content-Type: application/json" \
+  -d '{"id":"p1","name":"Laptop","stock":100,"price":999.99}'
+
+# 2. Checkout with saga (stock check + reserve + payment)
+curl -X POST http://localhost:3001/orders/checkout \
+  -H "Content-Type: application/json" \
+  -d '{"customerName":"John","customerEmail":"j@test.com","items":[{"productId":"p1","name":"Laptop","quantity":1,"price":999.99}]}'
 ```
 
 ## Roadmap

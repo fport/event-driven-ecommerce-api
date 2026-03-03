@@ -14,3 +14,4 @@ export type {
 export { EXCHANGES, ROUTING_KEYS, QUEUES } from "./types";
 export { logger } from "./logger";
 export { apmMiddleware, getTraceHeaders } from "./apm";
+export { metricsMiddleware, getPrometheusMetrics } from "./metrics";

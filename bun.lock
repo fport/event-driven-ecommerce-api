@@ -19,6 +19,7 @@
         "@ecommerce/shared": "workspace:*",
         "better-auth": "^1.2.0",
         "hono": "^4.7.0",
+        "ioredis": "^5.10.0",
       },
       "devDependencies": {
         "@types/bun": "^1.2.0",

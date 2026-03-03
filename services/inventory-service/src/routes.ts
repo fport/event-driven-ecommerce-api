@@ -1,11 +1,14 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { apmMiddleware } from "@ecommerce/shared";
+import { apmMiddleware, metricsMiddleware, getPrometheusMetrics } from "@ecommerce/shared";
 import { inventoryDb } from "./db";
 
 const app = new Hono();
 
 app.use("*", apmMiddleware());
+app.use("*", metricsMiddleware());
+
+app.get("/metrics", (c) => c.text(getPrometheusMetrics("inventory-service")));
 
 const productSchema = z.object({
   id: z.string().min(1),
@@ -52,6 +55,29 @@ app.post("/products", async (c) => {
 
   await inventoryDb.setProduct(result.data);
   return c.json({ success: true, data: result.data }, 201);
+});
+
+// PATCH /products/:id - Adjust stock
+app.patch("/products/:id", async (c) => {
+  const body = await c.req.json();
+  const stockChange = body.stockChange as number;
+  if (typeof stockChange !== "number") {
+    return c.json({ success: false, error: "stockChange is required" }, 400);
+  }
+
+  const product = await inventoryDb.getProduct(c.req.param("id"));
+  if (!product) {
+    return c.json({ success: false, error: "Product not found" }, 404);
+  }
+
+  const newStock = product.stock + stockChange;
+  if (newStock < 0) {
+    return c.json({ success: false, error: "Insufficient stock" }, 400);
+  }
+
+  product.stock = newStock;
+  await inventoryDb.setProduct(product);
+  return c.json({ success: true, data: product });
 });
 
 // DELETE /products/:id - Delete product
